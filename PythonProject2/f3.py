@@ -6,38 +6,589 @@ from ursina.audio import Audio
 from panda3d.core import loadPrcFileData
 import random
 from ursina import application
-
 from ursina import Shader
 import os, sys
+
+# ==================== НАСТРОЙКИ ПРОИЗВОДИТЕЛЬНОСТИ ====================
 loadPrcFileData('', 'sync-video False')
 loadPrcFileData('', 'clock-frame-rate 800')
 loadPrcFileData('', 'show-frame-rate-meter True')
 
-# Уменьшаем качество отображения
-scene.fog_density = 0.01  # Легкий туман для скрытия далеких объектов
+
+# ==================== ОПТИМИЗИРОВАННЫЕ СИСТЕМЫ ====================
+
+# ==================== ОПТИМИЗИРОВАННЫЕ СИСТЕМЫ ====================
+
+class ObjectManager:
+    def __init__(self):
+        self.all_entities = []
+        self.cleanup_timer = 0
+        self.cleanup_interval = 2.0
+
+    def register(self, entity):
+        if entity not in self.all_entities:
+            self.all_entities.append(entity)
+
+    def safe_destroy(self, entity):
+        if not entity:
+            return
+
+        if hasattr(entity, 'animate'):
+            entity.animate = None
+
+        self.unregister(entity)
+
+        if hasattr(entity, 'enabled') and entity.enabled:
+            destroy(entity)
+
+    def unregister(self, entity):
+        if entity in self.all_entities:
+            self.all_entities.remove(entity)
+
+    def cleanup_dead_objects(self):
+        initial_count = len(self.all_entities)
+        alive_entities = []
+
+        for entity in self.all_entities:
+            if (entity and hasattr(entity, 'enabled') and entity.enabled and
+                    hasattr(entity, 'position')):
+                alive_entities.append(entity)
+            else:
+                if entity and hasattr(entity, 'enabled') and entity.enabled:
+                    destroy(entity)
+
+        self.all_entities = alive_entities
+        cleaned = initial_count - len(self.all_entities)
+
+        if cleaned > 0:
+            print(f"🧹 Очищено {cleaned} мертвых объектов")
+
+    def update(self):
+        self.cleanup_timer += time.dt
+        if self.cleanup_timer >= self.cleanup_interval:
+            self.cleanup_dead_objects()
+            self.cleanup_timer = 0
+
+
+object_manager = ObjectManager()
+
+
+class SafeEntity(Entity):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object_manager.register(self)
+
+    def safe_destroy(self):
+        object_manager.safe_destroy(self)
+
+
+class ParticlePool:
+    def __init__(self, template_func, initial_size=20, max_size=100):
+        self.template_func = template_func
+        self.max_size = max_size
+        self.available = []
+        self.in_use = []
+
+        # Инициализируем начальный пул
+        for _ in range(initial_size):
+            particle = self._create_particle()
+            if particle:
+                self.available.append(particle)
+
+    def _create_particle(self):
+        try:
+            particle = self.template_func()
+            if particle:
+                # Безопасно отключаем частицу
+                if hasattr(particle, 'enabled'):
+                    particle.enabled = False
+                # Если это Entity, скрываем его
+                if hasattr(particle, 'visible'):
+                    particle.visible = False
+                # Устанавливаем eternal=False для безопасного уничтожения
+                if hasattr(particle, 'eternal'):
+                    particle.eternal = False
+            return particle
+        except Exception as e:
+            print(f"❌ Ошибка создания частицы в пуле: {e}")
+            return None
+
+    def get(self):
+        """Получить частицу из пула"""
+        # Сначала ищем в доступных
+        while self.available:
+            particle = self.available.pop()
+            if particle and self._is_particle_valid(particle):
+                try:
+                    self._activate_particle(particle)
+                    self.in_use.append(particle)
+                    return particle
+                except Exception as e:
+                    print(f"❌ Ошибка активации частицы: {e}")
+                    continue
+
+        # Если нет доступных, создаем новую
+        if len(self.in_use) < self.max_size:
+            particle = self._create_particle()
+            if particle and self._is_particle_valid(particle):
+                try:
+                    self._activate_particle(particle)
+                    self.in_use.append(particle)
+                    return particle
+                except Exception as e:
+                    print(f"❌ Ошибка активации новой частицы: {e}")
+
+        # Если достигли максимума, переиспользуем старую
+        if self.in_use:
+            particle = self.in_use.pop(0)
+            if particle and self._is_particle_valid(particle):
+                try:
+                    self._deactivate_particle(particle)
+                    self._activate_particle(particle)
+                    self.in_use.append(particle)
+                    return particle
+                except Exception as e:
+                    print(f"❌ Ошибка переиспользования частицы: {e}")
+
+        return None
+
+    def _is_particle_valid(self, particle):
+        """Проверяет, валидна ли частица"""
+        if not particle:
+            return False
+        # Проверяем, не уничтожена ли сущность
+        if hasattr(particle, '_destroyed') and particle._destroyed:
+            return False
+        return True
+
+    def _activate_particle(self, particle):
+        """Активирует частицу"""
+        if hasattr(particle, 'enabled'):
+            particle.enabled = True
+        if hasattr(particle, 'visible'):
+            particle.visible = True
+        # Сбрасываем прозрачность
+        if hasattr(particle, 'alpha'):
+            particle.alpha = 1.0
+
+    def _deactivate_particle(self, particle):
+        """Деактивирует частицу"""
+        if hasattr(particle, 'enabled'):
+            particle.enabled = False
+        if hasattr(particle, 'visible'):
+            particle.visible = False
+
+    def return_particle(self, particle):
+        """Вернуть частицу в пул"""
+        if not particle or not self._is_particle_valid(particle):
+            return
+
+        # Удаляем из используемых
+        if particle in self.in_use:
+            self.in_use.remove(particle)
+
+        # Деактивируем
+        self._deactivate_particle(particle)
+
+        # Возвращаем в пул если есть место
+        if len(self.available) < self.max_size:
+            self.available.append(particle)
+        else:
+            # Если пул полон, уничтожаем частицу
+            try:
+                destroy(particle)
+            except:
+                pass
+
+    def cleanup(self):
+        """Очистка невалидных частиц"""
+        # Очищаем доступные
+        self.available = [p for p in self.available if self._is_particle_valid(p)]
+        # Очищаем используемые
+        self.in_use = [p for p in self.in_use if self._is_particle_valid(p)]
+
+
+# Глобальные переменные для оптимизированных систем
+optimized_systems_initialized = False
+blood_pool = None
+muzzle_flash_pool = None
+animation_system = None
+
+
+def init_optimized_systems():
+    """Инициализирует все оптимизированные системы"""
+    global optimized_systems_initialized, blood_pool, muzzle_flash_pool, animation_system
+
+    if optimized_systems_initialized:
+        return
+
+    def create_blood_particle():
+        """Создает одну частицу крови"""
+        try:
+            # Используем SafeEntity для всех частиц
+            particle = SafeEntity(
+                model='cube',
+                color=color.rgba(0.6, 0, 0, 1),
+                scale=0.2,
+                add_to_scene_entities=True,
+                eternal=False,  # Не eternal!
+                enabled=False  # Начинаем отключенной
+            )
+            return particle
+        except Exception as e:
+            print(f"❌ Ошибка создания частицы крови: {e}")
+            return None
+
+    def create_muzzle_particle():
+        """Создает одну частицу дульной вспышки"""
+        try:
+            particle = SafeEntity(
+                model='cube',
+                color=color.yellow,
+                scale=0.05,
+                add_to_scene_entities=True,
+                eternal=False,  # Не eternal!
+                enabled=False  # Начинаем отключенной
+            )
+            return particle
+        except Exception as e:
+            print(f"❌ Ошибка создания частицы вспышки: {e}")
+            return None
+
+    try:
+        blood_pool = ParticlePool(create_blood_particle, 30, 100)
+        muzzle_flash_pool = ParticlePool(create_muzzle_particle, 20, 50)
+
+        class AnimationSystem:
+            def __init__(self):
+                self.animations = []
+
+            def add_animation(self, obj, duration, update_func, on_finished=None):
+                if not obj:
+                    return None
+
+                animation = {
+                    'obj': obj,
+                    'duration': duration,
+                    'elapsed': 0,
+                    'update_func': update_func,
+                    'on_finished': on_finished,
+                    'active': True
+                }
+                self.animations.append(animation)
+                return animation
+
+            def update(self):
+                current_time = time.time()
+
+                for anim in self.animations[:]:
+                    if not anim['active']:
+                        self.animations.remove(anim)
+                        continue
+
+                    anim['elapsed'] += time.dt
+
+                    # Проверяем, существует ли объект
+                    obj = anim['obj']
+                    if not obj or not self._is_object_valid(obj):
+                        anim['active'] = False
+                        continue
+
+                    progress = anim['elapsed'] / anim['duration']
+
+                    if progress >= 1.0:
+                        if anim['on_finished']:
+                            try:
+                                anim['on_finished']()
+                            except Exception as e:
+                                print(f"⚠️ Ошибка в on_finished: {e}")
+                        anim['active'] = False
+                    else:
+                        if anim['update_func']:
+                            try:
+                                anim['update_func'](progress, obj)
+                            except Exception as e:
+                                print(f"⚠️ Ошибка в update_func: {e}")
+
+                # Очищаем неактивные анимации
+                self.animations = [anim for anim in self.animations if anim['active']]
+
+            def _is_object_valid(self, obj):
+                """Проверяет, валиден ли объект"""
+                if not obj:
+                    return False
+                if hasattr(obj, '_destroyed') and obj._destroyed:
+                    return False
+                if hasattr(obj, 'enabled'):
+                    return obj.enabled
+                return True
+
+        animation_system = AnimationSystem()
+        optimized_systems_initialized = True
+        print("✅ Оптимизированные системы инициализированы")
+
+    except Exception as e:
+        print(f"❌ Критическая ошибка инициализации оптимизированных систем: {e}")
+        # Создаем простые системы в случае ошибки
+        optimized_systems_initialized = False
+
+
+# ==================== ОПТИМИЗИРОВАННЫЕ ВЕРСИИ ФУНКЦИЙ ====================
+
+def create_blood_effect_optimized(position):
+    """СУПЕР-ОПТИМИЗИРОВАННАЯ версия создания крови"""
+    global blood_pool
+
+    if not blood_pool:
+        try:
+            init_optimized_systems()
+        except:
+            print("❌ Не удалось инициализировать пул крови")
+            return []
+
+    if not blood_pool:
+        print("❌ Пул крови не инициализирован")
+        return []
+
+    # ОГРАНИЧИВАЕМ количество частиц
+    max_particles = 3  # Вместо 5
+    particles_to_create = min(max_particles, blood_pool.max_size - len(blood_pool.in_use))
+
+    if particles_to_create <= 0:
+        return []  # Нет доступных частиц
+
+    particles = []
+
+    # ОДНА центральная частица + несколько вокруг
+    for i in range(particles_to_create):
+        particle = blood_pool.get()
+        if not particle:
+            continue
+
+        try:
+            # Упрощенные свойства
+            particle.position = Vec3(
+                position.x + uniform(-0.5, 0.5),
+                position.y + uniform(0.2, 0.5),
+                position.z + uniform(-0.5, 0.5)
+            )
+
+            # Фиксированный цвет и размер
+            particle.color = color.rgba(0.6, 0, 0, 0.8)  # Меньше прозрачности
+            particle.scale = 0.15 if i == 0 else 0.1  # Центральная частица крупнее
+
+            if hasattr(particle, 'alpha'):
+                particle.alpha = 0.8
+
+            # Упрощенное направление
+            direction = Vec3(
+                uniform(-1, 1) if i > 0 else 0,  # Центральная не двигается
+                uniform(0.5, 1.5),
+                uniform(-1, 1) if i > 0 else 0
+            ).normalized()
+
+            # Упрощенные параметры
+            speed = uniform(2, 4) if i > 0 else 0  # Центральная не двигается
+            lifetime = uniform(0.8, 1.2)  # Короче время жизни
+
+            # Сохраняем начальные значения
+            start_scale = particle.scale
+            start_time = time.time()
+
+            # Простая функция обновления
+            def create_update_func(p=particle, d=direction, s=speed, l=lifetime, st=start_time, sc=start_scale):
+                def update_func(progress, obj):
+                    if not obj or not obj.enabled:
+                        return
+
+                    # Вычисляем время с момента создания
+                    elapsed = time.time() - st
+                    current_progress = elapsed / l
+
+                    if current_progress >= 1.0:
+                        return
+
+                    # Движение только для нецентральных частиц
+                    if s > 0:
+                        obj.position += d * s * time.dt
+                        obj.position.y -= time.dt * 1.5  # Меньше гравитации
+
+                    # Упрощенные анимации
+                    obj.alpha = 0.8 * (1.0 - current_progress)
+                    obj.scale = sc * (1.0 - current_progress * 0.3)
+
+                return update_func
+
+            update_func = create_update_func()
+
+            # Добавляем анимацию
+            anim = animation_system.add_animation(
+                particle,
+                lifetime,
+                update_func,
+                on_finished=lambda p=particle: blood_pool.return_particle(p) if blood_pool else None
+            )
+
+            if anim:
+                particles.append(particle)
+            else:
+                blood_pool.return_particle(particle)
+
+        except Exception as e:
+            print(f"❌ Ошибка настройки кровяной частицы: {e}")
+            blood_pool.return_particle(particle)
+
+    # ОГРАНИЧИВАЕМ общее количество эффектов крови
+    global blood_effects_count
+    if not hasattr(create_blood_effect_optimized, 'blood_effects_count'):
+        create_blood_effect_optimized.blood_effects_count = 0
+
+    create_blood_effect_optimized.blood_effects_count += 1
+
+    # Автоматическая очистка если слишком много эффектов
+    if create_blood_effect_optimized.blood_effects_count > 10:
+        cleanup_excess_blood_effects()
+
+    return particles
+
+
+def cleanup_excess_blood_effects():
+    """Очищает старые эффекты крови если их слишком много"""
+    global blood_effects_count
+
+    # Считаем активные частицы крови
+    active_particles = 0
+    for blood_particles in blood_effects[:]:
+        for particle_data in blood_particles[:]:
+            if len(particle_data) == 5:
+                particle, direction, speed, spawn_time, original_size = particle_data
+                if particle and particle.enabled:
+                    active_particles += 1
+                    # Удаляем старые частицы (> 3 секунд)
+                    if time.time() - spawn_time > 3.0:
+                        destroy(particle)
+                        blood_particles.remove(particle_data)
+                        active_particles -= 1
+
+    # Обновляем счетчик
+    create_blood_effect_optimized.blood_effects_count = active_particles
+
+    # Очищаем пул крови от неиспользуемых частиц
+    if blood_pool and hasattr(blood_pool, 'cleanup'):
+        blood_pool.cleanup()
+
+    print(f"🧹 Очистка крови: {active_particles} активных частиц")
+
+
+def safe_update_enemies_optimized():
+    """Безопасное обновление врагов"""
+    if not enemies:
+        return
+
+    current_time = time.time()
+
+    # Фильтруем только живых врагов
+    for enemy in enemies[:]:
+        if not enemy or not enemy.entity or not enemy.entity.enabled:
+            # Удаляем мертвых врагов из списка
+            if enemy in enemies:
+                enemies.remove(enemy)
+            continue
+
+        dist_to_player = (enemy.entity.position - player.position).length()
+
+        if dist_to_player <= enemy.detection_range:
+            enemy.is_chasing = True
+
+            if dist_to_player > enemy.attack_range:
+
+                target_height = 1.5  # На сколько выше ног идти
+                target_point = player.position + Vec3(0, target_height, 0)
+
+                # 2. Двигаемся к этой точке
+                direction = (target_point - enemy.entity.position).normalized()
+                enemy.entity.position += direction * enemy.chase_speed * time.dt
+
+                # 3. Поворачиваемся смотреть на игрока (только горизонталь)
+                # Берем направление в 2D (XZ плоскость), игнорируем высоту
+                dx = player.position.x - enemy.entity.position.x
+                dz = player.position.z - enemy.entity.position.z
+
+                if abs(dz) > 0.001:  # Маленькое число вместо 0
+                    angle_y = math.degrees(math.atan2(dx, dz))
+                    enemy.entity.rotation_y = angle_y  # Попробуй с минусом или без
+
+                # 4. Убираем наклоны
+                enemy.entity.rotation_x = 0
+                enemy.entity.rotation_z = 0
+
+            if dist_to_player <= enemy.attack_range:
+                if current_time - enemy.last_attack_time >= enemy.attack_cooldown:
+                    attack_player(enemy)
+                    enemy.last_attack_time = current_time
+
+
+# ==================== ФУНКЦИЯ ДЛЯ ИНТЕГРАЦИИ В UPDATE ====================
+
+def update_with_optimizations():
+    """Вызывать в начале твоего update() для добавления оптимизаций"""
+    global optimized_systems_initialized
+
+    if not optimized_systems_initialized:
+        init_optimized_systems()
+
+    # Обновляем системы менеджмента
+    object_manager.update()
+    animation_system.update()
+
+    global create_blood_effect
+    if 'create_blood_effect' in globals() and create_blood_effect != create_blood_effect_optimized:
+        print("🔄 Заменяем create_blood_effect на оптимизированную версию")
+        create_blood_effect = create_blood_effect_optimized
+
+
+# Остальной код остается без изменений...
+# (здесь продолжается твой оригинальный код)
 
 application.development_mode = False
+
+
 def resource_path(relative_path: str):
-    """Возвращает корректный путь для Python и EXE."""
+    """Получает правильный путь к ресурсам для работы и в exe"""
     if hasattr(sys, '_MEIPASS'):
-        # Когда программа упакована в exe
+        # Если запущено как exe
         return os.path.join(sys._MEIPASS, relative_path)
-    # Когда запускается из PyCharm / Python
+    # Если запущено как скрипт
     return os.path.join(os.path.abspath("."), relative_path)
 
 
 def load_shader(name):
-    """Надёжная загрузка GLSL шейдера."""
-    path = resource_path(name)
-    with open(path, encoding="utf-8") as f:
-        code = f.read()
-    return Shader(fragment=code)
+    """Загружает шейдер из файла"""
+    try:
+        path = resource_path(name)
+        with open(path, encoding="utf-8") as f:
+            code = f.read()
+        return Shader(fragment=code)
+    except FileNotFoundError:
+        print(f"⚠️ Файл шейдера '{name}' не найден. Используем простой шейдер.")
+        # Возвращаем простой шейдер по умолчанию
+        return Shader(language=Shader.GLSL, fragment='''
+            #version 140
+            uniform sampler2D p3d_Texture0;
+            uniform vec4 p3d_Color;
+            in vec2 uv;
+            out vec4 frag_color;
+            void main() {
+                frag_color = texture(p3d_Texture0, uv) * p3d_Color;
+            }
+        ''')
+
 
 app = Ursina()
 walk = Audio('walk.ogg', loop=True, autoplay=False)
 jump = Audio('jump.ogg', loop=False, autoplay=False)
-shoot_sound = Audio("shoot.ogg", autoplay=False,lood=False)
-shoot_sound2=Audio('shoot2.ogg', loop=False, autoplay=False)
+shoot_sound = Audio("shoot.ogg", autoplay=False, lood=False)
+shoot_sound2 = Audio('shoot2.ogg', loop=False, autoplay=False)
 dark_fantasy_shader = Shader(language=Shader.GLSL,
                              fragment='''
 #version 140
@@ -100,7 +651,6 @@ void main() {
     world_position = (p3d_ModelMatrix * p3d_Vertex).xyz;
 }
 ''')
-
 
 light_pistol_shader = Shader(language=Shader.GLSL,
                              fragment='''
@@ -166,24 +716,23 @@ void main() {
     world_position = (p3d_ModelMatrix * p3d_Vertex).xyz;
 }
 ''')
-ground = Entity(model='plane', texture='grass', collider='mesh',
-                scale=(100, 1, 100), position=(0,0,0))
+ground = Entity(color=color.clear, collider='box',
+                scale=(10000, 1, 10000), position=(0, 0, 0))
 
-player = FirstPersonController(collider='box')
+player = FirstPersonController(collider='sphere')
 player.position_y = 10
-player.position = (0, 10, 0)
+player.position = (0, 86, 0)
 player.camera_pivot.y = 3
 player.cursor.visible = True
-
 
 # ---------------------------
 # ШЕЙДЕР НАЗНАЧАЕМ ТУТ!!!
 # ---------------------------
-shader_enabled=False
-grenade_effect=0
-shoot_strength=0
-reload_strength=0
-walk_strength=0
+shader_enabled = False
+grenade_effect = 0
+shoot_strength = 0
+reload_strength = 0
+walk_strength = 0
 master_shader = load_shader("master_vfx.shader")
 camera.shader = master_shader
 
@@ -194,11 +743,8 @@ camera.set_shader_input("reload_strength", 0.0)
 camera.set_shader_input("walk_strength", 0.0)
 camera.set_shader_input("grenade_effect", 0.0)
 
-
 # Ground может иметь свой отдельный шейдер
 ground.shader = dark_fantasy_shader
-
-
 
 # НАГРУДНАЯ КАМЕРА - новые координаты
 # weapon = Entity(
@@ -208,20 +754,6 @@ ground.shader = dark_fantasy_shader
 #     rotation=(0, 180, 0),  # Поворот для вида с груди
 #     scale=2.5,shader=dark_fantasy_shader
 # )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Переменные для тряски КАМЕРЫ и ОРУЖИЯ
@@ -238,22 +770,22 @@ camera_breathing_intensity = 0.008
 camera_head_bob_intensity = 0.01
 
 # Параметры тряски для оружия (нормальная сила, но резкая)
-weapon_body_sway_intensity = 0.002      # Только небольшие движения
-weapon_step_impact_intensity = 0    # Умеренные удары
-weapon_breathing_intensity = 0.001      # Минимальное дыхание
+weapon_body_sway_intensity = 0.002  # Только небольшие движения
+weapon_step_impact_intensity = 0  # Умеренные удары
+weapon_breathing_intensity = 0.001  # Минимальное дыхание
 weapon_head_bob_intensity = 0.01
 
 # Переменные для анимации выстрела
 is_shooting = False
 shoot_animation_time = 0
 shoot_animation_duration = 0.1
-shoot_recoil = 0.1 # Отдача для камеры
+shoot_recoil = 0.1  # Отдача для камеры
 weapon_shoot_recoil = 0.2  # Отдача для оружия
-shoot_camera_shake_intensity = 0.08      # Основная сила тряски
-shoot_camera_kick_intensity = 0.15       # Резкий толчок назад
-shoot_camera_roll_intensity = 3.0        # Наклон камеры вбок
-shoot_camera_shake_duration = 0.25       # Общая длительность
-shoot_camera_kick_duration = 0.1         # Длительность толчка
+shoot_camera_shake_intensity = 0.08  # Основная сила тряски
+shoot_camera_kick_intensity = 0.15  # Резкий толчок назад
+shoot_camera_roll_intensity = 3.0  # Наклон камеры вбок
+shoot_camera_shake_duration = 0.25  # Общая длительность
+shoot_camera_kick_duration = 0.1  # Длительность толчка
 shoot_camera_roll_duration = 0.15
 
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ ОТСТАВАНИЯ ОРУЖИЯ
@@ -273,9 +805,9 @@ last_fire_time = 0
 auto_fire_delay = 0.05
 
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ ЭФФЕКТА ОГЛУШЕНИЯ
-stun_effect_intensity = 0.3           # Сила эффекта оглушения
-stun_effect_duration = 0.1            # Длительность эффекта
-stun_effect_time = 0                  # Таймер эффекта
+stun_effect_intensity = 0.3  # Сила эффекта оглушения
+stun_effect_duration = 0.1  # Длительность эффекта
+stun_effect_time = 0  # Таймер эффекта
 is_stunned = False
 
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ УПРАВЛЕНИЯ ЗВУКОМ
@@ -283,12 +815,10 @@ shoot_sound_duration = 0.05
 shoot_sound2_duration = 0.05
 last_shoot_sound_time = 0
 
-
 muzzle_flash_entities = []
 bullet_tracers = []
 muzzle_flash_duration = 0.1  # Увеличил длительность для частиц
 bullet_lifetime = 1.0
-
 
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ NPC И ЭФФЕКТОВ КРОВИ
 npcs = []
@@ -296,10 +826,18 @@ blood_effects = []
 blood_duration = 1.0  # Увеличили длительность
 blood_particle_count = 7  # Увеличили количество частиц в 2 раза
 blood_speed = 5.0  # Увеличили скорость разлета
-blood_gravity = 1.5   # Длительность эффекта крови
+blood_gravity = 1.5  # Длительность эффекта крови
 
 enemies = []
 enemy_projectiles = []
+# ОБНОВЛЯЕМ НАСТРОЙКИ СНАРЯДОВ
+ENEMY_PROJECTILE_COOLDOWN = 8.0  # Каждые 8 секунд
+ENEMY_PROJECTILE_SPEED = 3.0  # ОЧЕНЬ медленные снаряды
+ENEMY_PROJECTILE_DETECTION_RADIUS = 3.0  # Радиус взрыва при приближении
+ENEMY_PROJECTILE_MIN_SPEED = 1.5  # Минимальная скорость
+ENEMY_PROJECTILE_TURN_SPEED = 1.0  # Очень медленный поворот
+enemy_last_shot_time = {}  # Словарь для хранения времени последнего выстрела каждого врага
+
 # ПЕРЕМЕННЫЕ ДЛЯ HUD
 player_health = 100
 player_max_health = 100
@@ -313,20 +851,16 @@ heal_pickup_cooldown = 0
 ammo_pickups = []  # Список всех пачек патронов на карте
 ammo_pickup_cooldown = 0  # Задержка между подборами
 
-
-
 # ИДЕАЛЬНЫЕ НАСТРОЙКИ ДЛЯ ПЛАВНОГО ПРЫЖКА
-high_jump_power = 3.0      # Высота прыжка
-player_gravity = 1       # НИЗКАЯ гравитация - медленное падение
-
+high_jump_power = 3.0  # Высота прыжка
+player_gravity = 1  # НИЗКАЯ гравитация - медленное падение
 
 # ИСПРАВЛЕННАЯ СИСТЕМА ВОЛН
 current_stage = 1
 stage_enemies_spawned = False
 stage_enemies_killed = 0
 total_enemies_on_map = 0
-enemies_to_kill_for_stage = 0 # Общее количество врагов, которое нужно убить для перехода
-
+enemies_to_kill_for_stage = 0  # Общее количество врагов, которое нужно убить для перехода
 
 # ДОБАВЛЯЕМ ПЕРЕМЕННЫЕ ДЛЯ ТРЯСКИ ПРИ ВЗРЫВЕ
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ОБЪЕДИНЕННОЙ СИСТЕМЫ ТРЯСОК
@@ -337,16 +871,50 @@ is_explosion_shaking = False
 current_explosion_shake = (0, 0, 0)
 current_explosion_tilt = (0, 0, 0)
 
+game_started = False
+weapon_pedestal = None
+pickup_text = None
+start_weapon = None
+start_zone_center = Vec3(0, 0, 0)
+start_zone_radius = 10
+start_table_position = Vec3(27, 78, 0)
+pickup_radius = 10
+weapon_on_table = []
+table_highlight = None
+sword_on_table = None
+axe_on_table = None
+pistol_on_table = None
+copie_on_table = None
+main_weapon_on_table = None
 
-
+# Добавляем новые глобальные переменные
+camera_mode = "player"  # "player" или "table_view"
+table_camera_position = Vec3(27.45, 86, -0.4)  # Позиция камеры над столом
+table_camera_rotation = Vec3(90, 90, 0)  # Смотрим сверху вниз
+is_selecting_weapon = False
+weapon_selection_text = None
 
 unlocked_weapons = ["pistol"]  # Изначально только пистолет
 weapon_pickups = []  # Список оружия на карте
 current_mission_text = None
 
 
-stage_spawn_delay = 6.0  # 6 секунд для Stage 1, 3 секунды для остальных
 
+# Добавляем глобальные переменные для анимаций
+hovered_weapon = None
+selected_weapon = None
+weapon_selection_ui = None
+
+# Добавляем глобальные переменные для триггера
+trigger_area = None
+trigger_hint_text = None
+trigger_congratulation_text = None
+trigger_fade_overlay = None
+trigger_cooldown = 0
+trigger_activated = False
+trigger_center = Vec3(26.46, 19.23, 14.34)
+
+stage_spawn_delay = 6.0  # 6 секунд для Stage 1, 3 секунды для остальных
 
 # СИСТЕМА АНИМАЦИЙ СТАДИЙ
 stage_animation = {
@@ -475,11 +1043,6 @@ ammo_data = {
 }
 explosive_projectiles = []
 
-
-
-
-
-
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ СПРИНТА
 sprint_speed_multiplier = 1.8  # Множитель скорости при спринте
 is_sprinting = False
@@ -494,6 +1057,7 @@ is_reloading_anim = False
 reload_anim_time = 0
 reload_anim_duration = 0.6  # Длительность опускания/поднятия оружия
 reload_weapon_offset = 2.4
+
 
 # ДОБАВЛЯЕМ ПЕРЕМЕННЫЕ ДЛЯ АНИМАЦИИ ПЕРЕЗАРЯДКИ
 
@@ -518,7 +1082,6 @@ class Enemy:
         self.last_position = Vec3(position)  # Предыдущая позиция для проверки застревания
         self.stuck_timer = 0  # Таймер застревания
         self.stuck_threshold = 2.0  # Время до срабатывания анти-застревания
-
 
         self.hit_count = 0  # Количество полученных попаданий
 
@@ -555,7 +1118,7 @@ class Enemy:
         self.health = 1
         self.max_health = 1
         self.damage = 10
-        self.attack_range = 3.0
+        self.attack_range = 5
         self.attack_cooldown = 1.5
         self.chase_speed = uniform(6, 9)
         self.detection_range = 1000
@@ -573,7 +1136,7 @@ class Enemy:
         self.health = 2
         self.max_health = 2
         self.damage = 15
-        self.attack_range = 3.0
+        self.attack_range = 5
         self.attack_cooldown = 2.0
         self.chase_speed = uniform(6, 10.8)
         self.detection_range = 1000
@@ -602,110 +1165,1104 @@ class Enemy:
         self.wave_attack_range = 30  # БОСС использует волну с 18 метров
         self.ranged_attack_range = 50
 
+weapons_data = {
+    "axe": {
+        "name": "Топор",
+        "description": "Мощное рубящее оружие ближнего боя.\nВысокий урон, но медленная атака.",
+        "unlocked": False,
+        "damage": 45,
+        "attack_speed": "Медленная",
+        "icon_color": color.rgba(0.9, 0.7, 0.5, 1)  # Коричневатый
+    },
+    "sword": {
+        "name": "Меч",
+        "description": "Сбалансированное оружие ближнего боя.\nХорошее сочетание урона и скорости.",
+        "unlocked": False,
+        "damage": 35,
+        "attack_speed": "Средняя",
+        "icon_color": color.rgba(0.7, 0.7, 0.9, 1)  # Голубоватый
+    },
+    "pistol": {
+        "name": "Неизвестное оружие",
+        "description": "Непонятное приспособление из другого мира \nТочно неизвестно как им пользоваться \nНе рекомендуется",
+        "unlocked": True,  # Только пистолет доступен сначала
+        "damage": 0,
+        "attack_speed": "Неизвестно",
+        "ammo_capacity": "Неизвестно",
+        "icon_color": color.rgba(1, 0.5, 0, 1)  # Оранжевый
+    },
+    "copie": {
+        "name": "Копье",
+        "description": "Длинное оружие дальнего боя.\nОтличная дистанция, но требует пространства.",
+        "unlocked": False,
+        "damage": 40,
+        "attack_speed": "Медленная",
+        "range": "Дальняя",
+        "icon_color": color.rgba(0.8, 0.6, 0.4, 1)  # Бежевый
+    }
+}
+
+weapon_selection_ui = None
+selected_weapon = None
 
 
 
 
-myBox = Entity(model='cube', color=color.black, collider='box', position=(15, 0.5, 5))
-myBall = Entity(model='sphere', color=color.red, collider='sphere', position=(5, 0.5, 10))
+
+
+
+
+
+
+
+
+
+def create_weapon_colliders():
+    """Создает видимые коллайдеры вокруг оружия на столе"""
+    weapons_on_table = [
+        {
+            "entity": main_weapon_on_table,
+            "name": "pistol",
+            "color": color.clear,
+            "position": (27.45, 80, -2),
+            "scale": (1.4, 0.6, 0.8)  # Немного больше для пистолета
+        },
+        {
+            "entity": sword_on_table,
+            "name": "sword",
+            "color": color.clear,
+            "position": (27.45, 80, 4.24),
+            "scale": (2.5, 0.6, 1.0)  # Увеличиваем для меча
+        },
+        {
+            "entity": axe_on_table,
+            "name": "axe",
+            "color": color.clear,
+            "position": (28, 80, 2.02),
+            "scale": (2.0, 0.4, 1.6)  # Увеличиваем для топора
+        },
+        {
+            "entity": copie_on_table,
+            "name": "copie",
+            "color": color.clear,
+            "position": (27.45, 80, -0.28),
+            "scale": (3.5, 0.3, 0.3)  # Увеличиваем для копья
+        }
+    ]
+
+    for weapon_data in weapons_on_table:
+        if weapon_data["entity"]:
+            # Создаем ВИДИМЫЙ коллайдер
+            collider = Entity(
+                model='cube',
+                color=weapon_data["color"],
+                scale=weapon_data["scale"],
+                position=weapon_data["position"],
+                collider='box',
+                eternal=True,
+                enabled=True
+            )
+
+            # Сохраняем ссылки
+            collider.weapon_entity = weapon_data["entity"]
+            collider.weapon_name = weapon_data["name"]
+
+            print(f"🎯 Создан коллайдер для {weapon_data['name']}")
+
+
+def create_start_scene():
+    """Создает стартовую сцену с оружием на столе"""
+    global sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table
+    global table_highlight, pickup_text
+
+    print("🎮 Создаю стартовую сцену...")
+    print(f"📍 Стол находится на: {start_table_position}")
+
+    # 1. Подсветка стола
+    table_highlight = Entity(
+        model='cube',
+        color=color.rgba(0.4, 0.4, 0.4, 0.8),
+        scale=(6, 0.1, 4),
+        position=start_table_position,
+        eternal=True
+    )
+
+    # 2. МЕЧ на столе (левый угол)
+    try:
+        sword_on_table = Entity(
+            model='sword.glb',
+            position=(27.45, 80, 4.24),
+            rotation=(90, -5, 45),  # Лежит плашмя под углом
+            scale=0.04,
+            eternal=True,
+            shader=dark_fantasy_shader
+        )
+        print("✅ Меч добавлен на стол")
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить меч: {e}")
+        sword_on_table = Entity(
+            model='cube',
+            color=color.rgba(0.7, 0.7, 0.9, 1),  # Голубоватый цвет для меча
+            position=start_table_position + Vec3(-1.2, 0.05, -0.8),
+            rotation=(90, 0, 45),
+            scale=(1.0, 0.1, 0.2),
+            eternal=True
+        )
+
+    # 3. ТОПОР на столе (правый угол)
+    try:
+        axe_on_table = Entity(
+            model='axe.glb',
+            position=(25.45, 80, 2.02),
+            rotation=(90, 0, 90),  # Лежит плашмя
+            scale=0.3,
+            eternal=True,
+            shader=dark_fantasy_shader
+        )
+        print("✅ Топор добавлен на стол")
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить топор: {e}")
+        axe_on_table = Entity(
+            model='cube',
+            color=color.rgba(0.9, 0.7, 0.5, 1),  # Коричневатый цвет для топора
+            position=start_table_position + Vec3(1.2, 0.05, -0.4),
+            rotation=(90, 0, -30),
+            scale=(0.8, 0.1, 0.4),
+            eternal=True
+        )
+
+    # 4. КОПИЯ на столе (передний центр)
+    try:
+        copie_on_table = Entity(
+            model='copie.glb',
+            position=(27.45, 80, -0.28),
+            rotation=(0, 0, 30),  # Лежит плашмя
+            scale=0.0015,
+            eternal=True,
+            shader=dark_fantasy_shader
+        )
+        print("✅ Копия добавлена на стол")
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить копию: {e}")
+        copie_on_table = Entity(
+            model='cube',
+            color=color.rgba(0.8, 0.6, 0.4, 1),  # Бежевый цвет для копии
+            position=start_table_position + Vec3(0, 0.05, 0.8),
+            rotation=(90, 0, 90),
+            scale=(0.7, 0.1, 0.7),
+            eternal=True
+        )
+
+    # 5. ОСНОВНОЕ ОРУЖИЕ (ПИСТОЛЕТ) на столе (центр стола)
+    try:
+        main_weapon_on_table = Entity(
+            model='decore_pistol.glb',  # Это пистолет/основное оружие
+            position=(27.45, 80, -0.4),
+            rotation=(0, 0, 90),  # Лежит плашмя
+            scale=7,
+            eternal=True,
+            shader=light_pistol_shader
+        )
+        print("✅ Основное оружие (пистолет) добавлено на стол")
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить основное оружие: {e}")
+        main_weapon_on_table = Entity(
+            model='cube',
+            color=color.rgba(1, 0.5, 0, 1),  # Оранжевый цвет для основного оружия
+            position=start_table_position + Vec3(0, 0.1, 0),
+            rotation=(90, 0, 0),
+            scale=(2.0, 0.1, 0.8),
+            eternal=True
+        )
+
+    # 6. Текст подсказки
+    pickup_text = Text(
+        parent=camera.ui,
+        text="Нажмите E чтобы взять оружие",
+        position=(0, 0.3, 0),
+        scale=2.5,
+        color=color.yellow,
+        background=True,
+        background_color=color.rgba(0, 0, 0, 0.8),
+        enabled=False,
+        font='custom2.ttf'
+    )
+
+    print("✅ Стартовая сцена создана на столе с оружием")
+
+
+# ФУНКЦИЯ ПРОВЕРКИ БЛИЗОСТИ К ОРУЖИЮ
+def check_weapon_proximity():
+    """Оптимизированная проверка близости к столу"""
+    global pickup_text, game_started
+
+    # Если игра началась или идет выбор оружия - не проверяем
+    if game_started or is_selecting_weapon:
+        if pickup_text and pickup_text.enabled:
+            pickup_text.enabled = False
+        return
+
+    # Используем простую проверку без сложных вычислений
+    if not hasattr(check_weapon_proximity, 'last_check'):
+        check_weapon_proximity.last_check = 0
+
+    # Проверяем только раз в 0.5 секунды для оптимизации
+    current_time = time.time()
+    if current_time - check_weapon_proximity.last_check < 0.5:
+        return
+
+    check_weapon_proximity.last_check = current_time
+
+    # Простая проверка расстояния
+    dx = player.position.x - start_table_position.x
+    dz = player.position.z - start_table_position.z
+    distance_squared = dx * dx + dz * dz  # Без sqrt для оптимизации
+
+    if distance_squared < pickup_radius * pickup_radius:
+        if pickup_text and not pickup_text.enabled:
+            pickup_text.enabled = True
+            pickup_text.text = "Нажмите E чтобы осмотреть оружие"
+    else:
+        if pickup_text and pickup_text.enabled:
+            pickup_text.enabled = False
+
+
+# ФУНКЦИЯ ПЕРЕКЛЮЧЕНИЯ НА ВИД СВЕРХУ
+def switch_to_table_view():
+    """Переключает камеру на вид сверху над столом"""
+    global camera_mode, is_selecting_weapon, pickup_text, weapon_selection_text
+    global player_camera_position, player_camera_rotation  # Добавляем глобальные переменные
+
+    print("🎬 Переключаюсь на вид сверху над столом...")
+
+    # Сохраняем текущую позицию камеры игрока
+    player_camera_position = Vec3(camera.position)
+    player_camera_rotation = Vec3(camera.rotation)
+
+    # ОЧЕНЬ ВАЖНО: разблокируем мышь
+    mouse.locked = False
+    mouse.visible = True  # Делаем курсор видимым!
+
+    # Отключаем управление игроком
+    player.enabled = False
+    camera_mode = "table_view"
+    is_selecting_weapon = True
+
+    # Убираем старый текст
+    if pickup_text:
+        pickup_text.enabled = False
+
+    # Создаем новый текст для выбора оружия
+    weapon_selection_text = Text(
+        parent=camera.ui,
+        text="Выберите оружие мышкой",
+        position=(0, 0.4, 0),
+        scale=2.5,
+        color=color.yellow,
+        background=True,
+        background_color=color.rgba(0, 0, 0, 0.8),
+        font='custom2.ttf'
+    )
+
+    # Анимация подъема камеры
+    camera.animate_position(table_camera_position, duration=1.5, curve=curve.in_out_cubic)
+    camera.animate_rotation(table_camera_rotation, duration=1.5, curve=curve.in_out_cubic)
+
+    # После анимации разрешаем выбор оружия
+    invoke(enable_weapon_selection, delay=1.5)
+
+
+# ФУНКЦИЯ ВКЛЮЧЕНИЯ ВЫБОРА ОРУЖИЯ
+def enable_weapon_selection():
+    """Включает возможность выбора оружия мышкой"""
+    print("✅ Готово к выбору оружия!")
+
+    if weapon_selection_text:
+        weapon_selection_text.text = "Нажмите на оружие для просмотра информации"
+        weapon_selection_text.y = 0.4  # Перемещаем вниз
+        weapon_selection_text.scale = 2.0  # Уменьшаем немного
+
+    # Инициализируем оружия
+    weapons = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+
+    for weapon in weapons:
+        if weapon:
+            # Сохраняем исходные значения
+            weapon.original_pos = Vec3(weapon.position)
+            weapon.original_color = weapon.color if hasattr(weapon, 'color') else color.white
+            weapon.is_selected = False
+            weapon.is_hovered = False
+            weapon.is_raised = False
+            weapon.was_hovered_last_frame = False
+            weapon.animating_color = False
+
+    # Создаем коллайдеры
+    create_weapon_colliders()
+
+    print("🎮 Выберите оружие для просмотра информации")
+
+
+# ФУНКЦИЯ ПРОВЕРКИ НАЖАТИЯ МЫШКОЙ
+def check_mouse_click():
+    """Проверяет клик мышкой по оружию"""
+    global selected_weapon, weapon_selection_ui
+
+    if not is_selecting_weapon or camera_mode != "table_view":
+        return
+
+    if mouse.left:
+        if mouse.hovered_entity and hasattr(mouse.hovered_entity, 'weapon_name'):
+            clicked_entity = mouse.hovered_entity
+            weapon_name = clicked_entity.weapon_name
+            print(f"🎯 Выбрано оружие: {weapon_name}")
+
+            # Сбрасываем все другие оружия
+            weapons_list = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+            for weapon in weapons_list:
+                if weapon and weapon != clicked_entity.weapon_entity:
+                    # Плавно опускаем и возвращаем цвет
+                    if hasattr(weapon, 'original_pos'):
+                        weapon.animate_position(weapon.original_pos, duration=0.2, curve=curve.in_quad)
+                        weapon.is_raised = False
+                        weapon.is_selected = False
+
+                    if hasattr(weapon, 'original_color'):
+                        weapon.animate_color(weapon.original_color, duration=0.2, curve=curve.in_quad)
+
+            # Плавно поднимаем выбранное оружие, но не слишком высоко
+            clicked_entity.weapon_entity.is_selected = True
+            clicked_entity.weapon_entity.is_hovered = False
+
+            # Сохраняем позиции если еще не сохранены
+            if not hasattr(clicked_entity.weapon_entity, 'original_pos'):
+                clicked_entity.weapon_entity.original_pos = Vec3(clicked_entity.weapon_entity.position)
+
+            # Поднимаем только на 0.3 единицы (меньше чем при наведении)
+            selected_pos = Vec3(clicked_entity.weapon_entity.original_pos)
+            selected_pos.y += 0.3  # Только 0.3 вместо 1.0
+
+            # Плавная анимация подъема и изменения цвета
+            clicked_entity.weapon_entity.animate_position(selected_pos, duration=0.3, curve=curve.out_quad)
+            clicked_entity.weapon_entity.animate_color(color.white, duration=0.3, curve=curve.out_quad)
+            clicked_entity.weapon_entity.is_raised = True
+
+            # Сохраняем выбранное оружие
+            selected_weapon = weapon_name
+
+            # Показываем UI с информацией через небольшую задержку
+            invoke(lambda: show_weapon_info(weapon_name), delay=0.2)
+            return
+
+
+def show_weapon_info(weapon_name):
+    """Показывает UI с информацией о выбранном оружии"""
+    global weapon_selection_ui
+
+    # Скрываем предыдущий UI если есть
+    if weapon_selection_ui:
+        destroy(weapon_selection_ui)
+        weapon_selection_ui = None
+
+    # Получаем данные об оружии
+    data = weapons_data[weapon_name]
+
+    # Создаем основной контейнер UI (самый низкий уровень)
+    weapon_selection_ui = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.rgba(0.08, 0.08, 0.12, 0.95),
+        scale=(0.6, 0.7),
+        position=(0.2, 0, 0),
+        eternal=False
+    )
+
+    # Темная рамка вокруг (чуть выше основного фона)
+    border = Entity(
+        parent=weapon_selection_ui,
+        model='quad',
+        color=color.rgba(0.2, 0.2, 0.3, 0.8),
+        scale=(1.05, 1.05),
+        z=-0.01
+    )
+
+    # Заголовок (название оружия) - фон
+    name_bg = Entity(
+        parent=weapon_selection_ui,
+        model='quad',
+        color=color.rgba(0.15, 0.15, 0.2, 1),
+        scale=(0.9, 0.12),
+        position=(0, 0.35, -0.05),
+        z=-0.02
+    )
+
+    # Текст названия оружия (посередине своего фона)
+    name_text = Text(
+        parent=weapon_selection_ui,
+        text=data["name"],
+        position=(0, 0.35, -0.1),
+        scale=3.0,
+        color=color.white,
+        font='custom2.ttf',
+        origin=(0, 0)
+    )
+
+    # Окно описания - фон
+    desc_bg = Entity(
+        parent=weapon_selection_ui,
+        model='quad',
+        color=color.rgba(0.12, 0.12, 0.16, 0.7),
+        scale=(0.85, 0.4),
+        position=(0, 0.05, -0.05),
+        z=-0.02
+    )
+
+    # Описание оружия - текст с увеличенным размером 2.5
+    desc_text = Text(
+        parent=weapon_selection_ui,
+        text=data["description"],
+        position=(0, 0.05, -0.1),
+        scale=2.5,
+        color=color.light_gray,
+        wordwrap=25,
+        line_height=1.2,
+        font='custom2.ttf',
+        origin=(0, 0)
+    )
+
+    # Статистика - фон
+    stats_bg = Entity(
+        parent=weapon_selection_ui,
+        model='quad',
+        color=color.rgba(0.15, 0.15, 0.2, 1),
+        scale=(0.85, 0.15),
+        position=(0, -0.25, -0.05),
+        z=-0.02
+    )
+
+    stats_y = -0.25
+    stats = [
+        f"УРОН: {data['damage']}",
+        f"СКОРОСТЬ: {data['attack_speed']}"
+    ]
+
+    if weapon_name == "pistol":
+        stats.append(f"ПАТРОНЫ: {data['ammo_capacity']}")
+    elif weapon_name == "copie":
+        stats.append(f"ДАЛЬНОСТЬ: {data['range']}")
+
+    # Распределяем характеристики по вертикали
+    stats_height = 0.12
+    stat_spacing = stats_height / (len(stats) + 1)
+
+    for i, stat in enumerate(stats):
+        y_pos = stats_y + (stats_height / 2) - (i + 1) * stat_spacing
+
+        stat_text = Text(
+            parent=weapon_selection_ui,
+            text=stat,
+            position=(0, y_pos, -0.1),
+            scale=1.8,
+            color=color.yellow,
+            font='custom2.ttf',
+            origin=(0, 0)
+        )
+
+    # КНОПКА ЗАКРЫТИЯ "X"
+    close_button = Button(
+        parent=weapon_selection_ui,
+        text='X',
+        color=color.red,
+        scale=(0.08, 0.08),
+        position=(0.45, 0.35, -0.5),
+        on_click=lambda: close_weapon_info()
+    )
+    close_button.text_entity.font = 'custom2.ttf'
+
+    # Кнопка выбора/блокировки
+    button_y = -0.45
+
+    if weapon_name == "pistol":
+        # Кнопка "ВЫБРАТЬ" - создаем обычную кнопку
+        select_button = Button(
+            parent=weapon_selection_ui,
+            text='ВЫБРАТЬ',
+            color=color.rgba(0.2, 0.6, 0.2, 1),
+            scale=(0.4, 0.12),
+            position=(0, button_y, -0.1),
+            on_click=lambda: select_weapon(weapon_name),
+            font='custom2.ttf'
+        )
+        select_button.text_entity.font = 'custom2.ttf'
+
+        # Эффект наведения для кнопки (без изменения масштаба текста!)
+        def on_hover():
+            select_button.color = color.rgba(0.3, 0.8, 0.3, 1)
+            select_button.scale = (0.42, 0.13)
+            # НЕ меняем масштаб текста - только цвет и тень
+            select_button.text_entity.color = color.rgb(240, 255, 240)
+            # Добавляем легкую тень
+            if not hasattr(select_button.text_entity, 'shadow'):
+                select_button.text_entity.shadow = Text(
+                    parent=select_button,
+                    text='ВЫБРАТЬ',
+                    position=(0.005, -0.005, -0.02),
+                    scale=2.0,
+                    color=color.rgba(0, 0, 0, 0.5),
+                    font='custom2.ttf'
+                )
+                select_button.text_entity.font = 'custom2.ttf'
+
+        def on_exit():
+            select_button.color = select_button.original_color
+            select_button.scale = select_button.original_scale
+            select_button.text_entity.color = color.white
+            # Убираем тень
+            if hasattr(select_button.text_entity, 'shadow'):
+                destroy(select_button.text_entity.shadow)
+                delattr(select_button.text_entity, 'shadow')
+
+        select_button.hover = on_hover
+        select_button.exit = on_exit
+
+    else:
+        locked_button = Button(
+            parent=weapon_selection_ui,
+            text='ЗАБЛОКИРОВАНО',
+            color=color.rgba(0.3, 0.3, 0.3, 1),
+            scale=(0.5, 0.12),
+            position=(0, button_y, -0.1),
+            font='custom2.ttf',
+        )
+        locked_button.text_entity.font = 'custom2.ttf'
+
+        # Текст о разблокировке
+        unlock_text = Text(
+            parent=weapon_selection_ui,
+            text="Разблокируется на высоких уровнях",
+            position=(0.3, button_y - 0.12, -0.1),
+            scale=1.3,
+            color=color.light_gray,
+            font='custom2.ttf',
+            origin=(0, 0)
+        )
+
+    # Иконка оружия
+    icon_size = 0.09
+    icon = Entity(
+        parent=weapon_selection_ui,
+        model='quad',
+        color=data["icon_color"],
+        scale=(icon_size, icon_size),
+        position=(-0.4, 0.35, -0.1),
+    )
+
+    print(f"ℹ️ Показана информация о {weapon_name}")
+
+
+def close_weapon_info():
+    """Закрывает UI с информацией и плавно опускает оружие"""
+    global weapon_selection_ui, selected_weapon
+
+    if weapon_selection_ui:
+        destroy(weapon_selection_ui)
+        weapon_selection_ui = None
+
+    # Плавно опускаем выбранное оружие обратно (если оно было поднято)
+    if selected_weapon:
+        weapons_dict = {
+            "pistol": main_weapon_on_table,
+            "sword": sword_on_table,
+            "axe": axe_on_table,
+            "copie": copie_on_table
+        }
+
+        weapon_entity = weapons_dict.get(selected_weapon)
+        if weapon_entity and hasattr(weapon_entity, 'original_pos'):
+            weapon_entity.is_selected = False
+            weapon_entity.is_hovered = False
+
+            # Только если оружие было поднято
+            if getattr(weapon_entity, 'is_raised', False):
+                weapon_entity.animate_position(weapon_entity.original_pos, duration=0.3, curve=curve.in_quad)
+
+            if hasattr(weapon_entity, 'original_color'):
+                weapon_entity.animate_color(weapon_entity.original_color, duration=0.3, curve=curve.in_quad)
+
+            weapon_entity.is_raised = False
+
+        selected_weapon = None
+
+    print("📋 Закрыто окно информации об оружии")
+
+
+def select_weapon(weapon_name):
+    """Выбирает оружие и начинает игру"""
+    global weapon_selection_ui, selected_weapon
+
+    print(f"✅ Выбрано оружие: {weapon_name}")
+
+    # Проверяем что выбран пистолет
+    if weapon_name != "pistol":
+        print("❌ Можно выбрать только пистолет для начала игры!")
+
+        # Показываем сообщение об ошибке
+        if weapon_selection_text:
+            weapon_selection_text.text = "Только пистолет доступен в начале!"
+            weapon_selection_text.color = color.red
+            weapon_selection_text.y = -0.4  # Перемещаем вниз чтобы не мешать
+
+            # Возвращаем обычный текст через 2 секунды
+            invoke(lambda: setattr(weapon_selection_text, 'text',
+                                   "Нажмите на оружие для просмотра")
+            if weapon_selection_text else None, delay=2.0)
+            invoke(lambda: setattr(weapon_selection_text, 'color', color.yellow)
+            if weapon_selection_text else None, delay=2.0)
+            invoke(lambda: setattr(weapon_selection_text, 'y', 0.3)
+            if weapon_selection_text else None, delay=2.0)
+        return
+
+    # Закрываем UI
+    if weapon_selection_ui:
+        destroy(weapon_selection_ui)
+        weapon_selection_ui = None
+
+    # Перемещаем подсказку ВНИЗ, чтобы она не мешала
+    if weapon_selection_text:
+        weapon_selection_text.text = "Начинаем игру..."
+        weapon_selection_text.color = color.green
+        weapon_selection_text.y = -0.45  # Очень низко
+
+    # НЕ поднимаем оружие - оставляем на том же уровне
+    # Просто делаем его белым и немного увеличиваем
+    if main_weapon_on_table:
+        # Только изменение цвета и небольшое увеличение
+        main_weapon_on_table.animate_scale(
+            7.5,  # Небольшое увеличение
+            duration=0.5,
+            curve=curve.out_quad
+        )
+
+        # Делаем ярко-белым
+        main_weapon_on_table.animate_color(
+            color.rgba(1, 1, 1, 1),
+            duration=0.5
+        )
+
+        # Добавляем легкое свечение без подъема
+        glow = Entity(
+            parent=main_weapon_on_table,
+            model='sphere',
+            color=color.rgba(1, 1, 1, 0.2),
+            scale=2,
+            position=(0, 0, 0)
+        )
+        glow.animate_scale(4, duration=0.5)
+        glow.animate_color(color.rgba(1, 1, 1, 0), duration=0.5)
+        invoke(lambda: destroy(glow) if glow else None, delay=0.5)
+
+    # Возвращаем другие оружия на место (если они были подняты)
+    weapons_list = [sword_on_table, axe_on_table, copie_on_table]
+    for weapon in weapons_list:
+        if weapon and hasattr(weapon, 'original_pos'):
+            if getattr(weapon, 'is_raised', False):
+                weapon.animate_position(weapon.original_pos, duration=0.3, curve=curve.in_quad)
+            weapon.is_selected = False
+            weapon.is_hovered = False
+            weapon.is_raised = False
+
+            if hasattr(weapon, 'original_color'):
+                weapon.animate_color(weapon.original_color, duration=0.3, curve=curve.in_quad)
+
+    # Начинаем игру через небольшой промежуток
+    print("🎮 Начинаем игру с пистолетом...")
+    invoke(start_game_from_weapon, delay=0.7)
+
+
+def highlight_hovered_weapon():
+    """Плавно поднимает и подсвечивает оружие при наведении мыши"""
+    # Находим все оружия на столе
+    weapons_list = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+
+    # Сбрасываем флаг наведения для всех оружий
+    for weapon in weapons_list:
+        if weapon:
+            weapon.was_hovered_last_frame = getattr(weapon, 'is_hovered', False)
+            weapon.is_hovered = False
+
+    # Определяем на какое оружие наведен курсор
+    hovered_weapon_entity = None
+    if mouse.hovered_entity and hasattr(mouse.hovered_entity, 'weapon_name') and not weapon_selection_ui:
+        hovered_entity = mouse.hovered_entity
+        if hovered_entity.weapon_entity and not getattr(hovered_entity.weapon_entity, 'is_selected', False):
+            hovered_weapon_entity = hovered_entity.weapon_entity
+            hovered_weapon_entity.is_hovered = True
+
+    # Обрабатываем каждое оружие
+    for weapon in weapons_list:
+        if not weapon:
+            continue
+
+        # Сохраняем оригинальные значения если еще не сохранены
+        if not hasattr(weapon, 'original_pos'):
+            weapon.original_pos = Vec3(weapon.position)
+        if not hasattr(weapon, 'original_color'):
+            weapon.original_color = weapon.color if hasattr(weapon, 'color') else color.white
+
+        # Если оружие выбрано - пропускаем (оно обрабатывается отдельно)
+        if getattr(weapon, 'is_selected', False):
+            continue
+
+        # Если наводимся на это оружие
+        if weapon == hovered_weapon_entity:
+            # Плавно поднимаем
+            target_pos = Vec3(weapon.original_pos)
+            target_pos.y += 0.5
+
+            if not getattr(weapon, 'is_raised', False):
+                weapon.animate_position(target_pos, duration=0.2, curve=curve.out_quad)
+                weapon.is_raised = True
+
+            # Плавно делаем светлее
+            target_color = color.rgba(
+                min(1.0, weapon.original_color.r * 1.3),
+                min(1.0, weapon.original_color.g * 1.3),
+                min(1.0, weapon.original_color.b * 1.3),
+                weapon.original_color.a if hasattr(weapon.original_color, 'a') else 1.0
+            )
+
+            if not hasattr(weapon, 'animating_color') or not weapon.animating_color:
+                weapon.animate_color(target_color, duration=0.2, curve=curve.out_quad)
+                weapon.animating_color = True
+
+        # Если убрали курсор с этого оружия
+        elif getattr(weapon, 'was_hovered_last_frame', False) and not getattr(weapon, 'is_hovered', False):
+            # Плавно опускаем обратно
+            weapon.animate_position(weapon.original_pos, duration=0.2, curve=curve.in_quad)
+            weapon.is_raised = False
+
+            # Плавно возвращаем оригинальный цвет
+            weapon.animate_color(weapon.original_color, duration=0.2, curve=curve.in_quad)
+            weapon.animating_color = False
+
+
+def start_game_from_weapon():
+    """Начинает игру после выбора пистолета"""
+    global game_started, pickup_text, current_stage, enemies_spawned_for_current_stage
+    global sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table
+    global table_highlight, is_selecting_weapon, weapon_selection_text, camera_mode
+    global weapon_hud, ammo_text, weapon_icons, selected_weapon
+
+    if game_started:
+        return
+    create_trigger_area()
+
+    # Проверяем, что выбран пистолет (только он доступен в начале)
+    if selected_weapon != "pistol":
+        print(f"❌ Можно выбрать только пистолет для начала игры!")
+
+        # Показываем сообщение
+        if weapon_selection_text:
+            weapon_selection_text.text = "Только пистолет доступен в начале!"
+            weapon_selection_text.color = color.red
+
+            # Через 2 секунды возвращаем обычный текст
+            invoke(lambda: setattr(weapon_selection_text, 'text',
+                                   "Нажмите на оружие для просмотра информации")
+            if weapon_selection_text else None, delay=2.0)
+            invoke(lambda: setattr(weapon_selection_text, 'color', color.yellow)
+            if weapon_selection_text else None, delay=2.0)
+        return
+
+    print("🎮 Начинаем игру с выбранным оружием!")
+
+    # Убираем коллайдеры
+    for entity in scene.entities[:]:  # Используем копию списка
+        if hasattr(entity, 'weapon_name'):
+            destroy(entity)
+
+    # Анимация увеличения пистолета перед началом
+    if main_weapon_on_table:
+        main_weapon_on_table.animate_scale(main_weapon_on_table.scale * 1.5, duration=0.5)
+        main_weapon_on_table.animate_color(color.white, duration=0.5)
+
+    # Ждем завершения анимации
+    invoke(finish_game_start, delay=0.7)
+
+
+def finish_game_start():
+    """Завершает начало игры после анимации - ТЕПЕРЬ С ПОЛНОЙ ОЧИСТКОЙ"""
+    global game_started, pickup_text, current_stage, enemies_spawned_for_current_stage
+    global weapon_hud, ammo_text, weapon_icons  # Добавляем глобальные переменные HUD
+
+    print("🎮 Начинаем игру с выбранным оружием!")
+
+    # =========== ПОЛНАЯ ОЧИСТКА ЛОББИ ===========
+    cleanup_lobby_entirely()
+
+    game_started = True
+    camera_mode = "player"
+
+    # Включаем управление игроком
+    player.enabled = True
+    mouse.locked = True
+    player.position = Vec3(50, 10, -31)
+    camera.position = (0, 0, 0)
+    camera.rotation = (0, 0, 0)
+    location.enabled=False
+    cl2_1.enabled=False
+
+    print(f"📍 Телепортация на: {player.position}")
+
+    # ПРОВЕРЯЕМ, ЧТО HUD ЕЩЕ НЕ СОЗДАН
+    if weapon_hud is None:  # Если HUD еще не создан
+        # Инициализируем HUD
+        create_health_hud()
+        create_weapon_hud()
+    else:
+        # Если HUD уже существует, просто обновляем
+        update_health_hud()
+        update_weapon_hud()
+
+    # Разблокируем пистолет и переключаемся на него
+    if "pistol" not in unlocked_weapons:
+        unlocked_weapons.append("pistol")
+
+    switch_weapon("pistol")
+
+    # Даем начальные патроны
+    ammo_data["pistol"]["current_ammo"] = 20
+    ammo_data["pistol"]["max_ammo"] = 20
+    ammo_data["pistol"]["reserve_ammo"] = 60
+    ammo_data["pistol"]["ammo_per_mag"] = 20
+
+    # Обновляем HUD
+    update_weapon_hud()
+    update_health_hud()
+
+    # Инициализируем оптимизированные системы
+    if not optimized_systems_initialized:
+        init_optimized_systems()
+
+    # Запускаем первую стадию (через небольшую задержку)
+    current_stage = 1
+    enemies_spawned_for_current_stage = False
+    update_shader_intensity()
+
+
+
+
+    print("🎮 Запускаем анимацию Stage 1...")
+    start_stage_animation(1)
+
+
+def cleanup_lobby_entirely():
+    """Полностью удаляет ВСЕ ресурсы начального лобби"""
+    print("🧹 Начинаю полную очистку лобби...")
+    global sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table
+    global table_highlight, weapon_selection_text
+
+    # 1. Удаляем все оружие со стола
+    lobby_weapons = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+    for weapon in lobby_weapons:
+        if weapon:
+            try:
+                destroy(weapon)
+            except:
+                pass
+
+    # 2. Удаляем подсветку стола
+    if table_highlight:
+        try:
+            destroy(table_highlight)
+        except:
+            pass
+
+    # 3. Удаляем ВСЕ коллайдеры для выбора оружия
+    for entity in scene.entities[:]:  # Используем копию списка для безопасного удаления
+        if hasattr(entity, 'weapon_name'):
+            try:
+                destroy(entity)
+            except:
+                pass
+
+    # 4. Удаляем текст выбора оружия
+    if weapon_selection_text:
+        try:
+            destroy(weapon_selection_text)
+        except:
+            pass
+
+    # 5. Удаляем pickup_text
+    if pickup_text:
+        try:
+            pickup_text.enabled = False
+            destroy(pickup_text)
+        except:
+            pass
+
+    # 6. Обнуляем все глобальные переменные лобби
+
+    table_highlight.enabled = False
+    axe_on_table.enabled = False
+    sword_on_table.enabled = False
+    main_weapon_on_table.enabled = False
+    copie_on_table.enabled = False
+
+    # 7. Выключаем все проверки связанные с лобби
+    global is_selecting_weapon, camera_mode
+    is_selecting_weapon = False
+    camera_mode = "player"
+
+    # 8. Принудительный сбор мусора
+    import gc
+    gc.collect()
+
+    print("✅ Лобби полностью очищено!")
+
+
+def create_wall(p1, p2, thickness=0.3, height=1, color_wall=color.gray):
+    """
+    Создаёт наклонённую стену между точками p1 и p2.
+
+    p1, p2 — (x, y, z)
+    thickness — толщина стены
+    height — высота стены
+    """
+    x1, y1, z1 = p1
+    x2, y2, z2 = p2
+
+    start = Vec3(x1, y1, z1)
+    end = Vec3(x2, y2, z2)
+
+    # Центр стены
+    center = (start + end) / 2
+
+    # Длина стены в 3D
+    length_3d = distance(start, end)
+
+    # Направление по горизонтали (X, Z)
+    horizontal_direction = Vec3(end.x - start.x, 0, end.z - start.z)
+    horizontal_length = horizontal_direction.length()
+
+    # Угол поворота вокруг Y (горизонтальная плоскость)
+    angle_y = math.degrees(math.atan2(horizontal_direction.z, horizontal_direction.x))
+
+    # Направление по вертикали (ось Y)
+    vertical_direction = end.y - start.y
+
+    # Угол наклона по вертикали (ось X)
+    angle_x = math.degrees(math.atan2(vertical_direction, horizontal_length))
+
+    # Создаём стену
+    wall = Entity(
+        model='cube',
+        position=center,
+        scale=(length_3d, height, thickness),
+        rotation=Vec3(angle_x, -angle_y, 0),
+        collider='box',
+        color=color.clear
+    )
+
+    return wall
+
+
 sky = Sky()
+location = Entity(model='1_location.glb', scale=5, position=(0, 150, 0), shader=dark_fantasy_shader)
+cl2_1 = Entity(model='cube', scale=(100, 2, 100), position=(0, 76, 0), rotation=(0, 0, 0), color=color.white,
+               collider='box')
+location2 = Entity(model='locationtest2.glb', scale=80, position=(0, 1, 0), )
+cl1 = Entity(model='cube', scale=(1, 20, 40), position=(-16, 0, -290), color=color.clear,
+             collider='box')
+cl2 = Entity(model='cube', scale=(1, 20, 50), position=(-24, 0, -248), rotation=(0, -20, 0), color=color.clear,
+             collider='box')
+create_wall((-74, 0, -190), (-60, 0, -120), height=40)
+create_wall((-34, 0, -209), (-72, 0, -183), height=40)
+create_wall((-34, 0, -208), (-31, 0, -228), height=40)
+create_wall((-4, 0, -310), (-6, 0, -223), height=40, thickness=2)
+create_wall((-6, 0, -223), (25, 0, -188), height=40, thickness=2)
+create_wall((24, 0, -188), (59, 0, -174), height=40, thickness=2)
+create_wall((62, 0, -174), (70, 0, -69), height=18)
+create_wall((-60, 0, -120), (-29, 0, -129), height=40)
+create_wall((-29, 0, -129), (9, 0, -118), height=40)
+create_wall((9, 0, -118), (24, 0, -108), height=40)
+create_wall((9, 0, -118), (24, 0, -108), height=40)
+create_wall((23.34, 0, -107.15), (18.22, 0, -106.65), thickness=0.2, height=40)
+create_wall((18.22, 0, -106.65), (18.39, 0, -93.21), thickness=0.2, height=40)
+create_wall((18.39, 0, -93.21), (32.71, 0, -93.35), thickness=0.2, height=40)
+create_wall((33, 0, -93.35), (41.87, 0, -13), thickness=1, height=40)
+create_wall((26, 1, -16), (26, 1, 55), height=80)
+create_wall((26, 1, 55), (82, 0, 51), height=80)
+create_wall((82, 0, 51), (100, 0, 23), height=40)
+create_wall((100, 0, 23), (94, 0, 4), height=40)
+create_wall((94, 0, 4), (97, 0, -98), height=40)
+create_wall((94, 0, 4), (97, 0, -98), height=40)
+create_wall((97, 0, -98), (93, 0, -129), height=40)
+create_wall((93, 0, -129), (98, 0, -171), height=40)
+create_wall((98, 0, -171), (59.3, 0, -173.54), height=40)
+create_wall((10, 1, -10), (41, 1, -14), height=80)
+
+cl3 = Entity(model='cube', scale=(20, 30, 13), position=(-60, 0, -157), rotation=(0, 12, 0), color=color.clear,
+             collider='box')
+cl4 = Entity(model='cube', scale=(10, 20, 10), position=(60, 0, -173.54), color=color.clear,
+             collider='box')
+cl5 = Entity(model='cube', scale=(13, 8, 13), position=(25, 0, -100), color=color.clear,
+             collider='box')
+cl6 = Entity(model='cube', scale=(13, 2, 8), position=(35, 0, -100), rotation=(0, 0, 45), color=color.clear,
+             collider='box')
+cl7 = Entity(model='cube', scale=(13, 3, 10), position=(30, 0, -108), rotation=(0, 45, 45), color=color.clear,
+             collider='box')
+cl8 = Entity(model='cube', scale=(2, 10, 2), position=(23.05, 4.16, -107.84), color=color.clear,
+             collider='box')
+cl9 = Entity(model='cube', scale=(4, 10, 4), position=(20.41, 4, -104.78), color=color.clear,
+             collider='box')
+cl11 = Entity(model='cube', scale=(110, 2, 39), position=(84, 11, -127), rotation=(-10, 95, 0), color=color.clear,
+              collider='box')
+cl12 = Entity(model='cube', scale=(25, 4, 26), position=(76.52, 10, -161), rotation=(1, 10, -10), color=color.clear,
+              collider='box')
+cl13 = Entity(model='cube', scale=(100, 6, 140), position=(91, 2, -2), rotation=(-1, 0, -5), color=color.clear,
+              collider='box')
+cl14 = Entity(model='cube', scale=(34, 5.5, 45), position=(87, 2.5, -52.41), rotation=(18, 0, -9), color=color.clear,
+              collider='box')
+cl15 = Entity(model='cube', scale=(100, 5.5, 70), position=(60, 2, 20), rotation=(0, 0, 23), color=color.clear,
+              collider='box')
+cl16 = Entity(model='cube', scale=(52, 1, 70), position=(-40, 3.5, -140), rotation=(-8, 0, 0), color=color.clear,
+              collider='box')
+cl17 = Entity(model='cube', scale=(30, 1, 25), position=(-1, 2, -135), rotation=(0, -18, 8), color=color.clear,
+              collider='box')
+cl18 = Entity(model='cube', scale=(30, 1, 30), position=(-2, 1.5, -159), rotation=(-4, 0, 0), color=color.clear,
+              collider='box')
+cl19 = Entity(model='cube', scale=(30, 1, 20), position=(45, 0, -15), rotation=(90, 0, 0), color=color.clear,
+              collider='box')
+
+
+hahaluna=Entity(model='cube',scale=(100,0.1,100),position=(-180,80,130),rotation=(90,0,-60),texture='luna.png',collider='box')
 # ИСПРАВЛЯЕМ ЦВЕТ НЕБА (от 0 до 1 вместо 0-255)
 sky.color = color.rgb(0.12, 0.1, 0.2)
 lvl = 1
-blocks = []
-directions = []
+
+coordinates_debug_timer = 0.0
+
+
+def show_coordinates_console():
+    """Показывает координаты игрока в консоли каждую секунду"""
+    # Используем глобальную переменную для таймера
+    global coordinates_debug_timer
+
+    if 'coordinates_debug_timer' not in globals():
+        coordinates_debug_timer = 0.0
+
+    coordinates_debug_timer += time.dt
+
+    if coordinates_debug_timer >= 1.0:
+        x = round(player.position.x, 2)
+        y = round(player.position.y, 2)
+        z = round(player.position.z, 2)
+
+        print(f"📍 Координаты: X={x}, Y={y}, Z={z}")
+        coordinates_debug_timer = 0.0
+
 
 window.fullscreen = False
-
-for i in range(10):
-    r = uniform(-2, 2)
-    block = Entity(position=(r, 1 + i, 3 + i * 5), model='cube', texture='white_cube', color=color.azure,
-                   scale=(3, 0.5, 3), collider='box',shader=dark_fantasy_shader)
-    blocks.append(block)
-    if r < 0:
-        directions.append(1)
-    else:
-        directions.append(-1)
-
-goal = Entity(color=color.gold, model='cube', texture='white_cube', position=(0, 11, 55), scale=(10, 1, 10),
-              collider='box',shader=dark_fantasy_shader)
-pillar = Entity(color=color.green, model='cube', position=(0, 36, 58), scale=(1, 50, 1),shader=dark_fantasy_shader)
-
-
-
-house_x = -18
-house_z = 20
-house_y = 0
-
-house_left = Entity(parent=scene, position=(house_x, house_y, house_z))
-
-walls = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.light_gray,
-    scale=(8, 3.5, 6),
-    position=(0, 1.75, 0),
-    collider='box',shader=dark_fantasy_shader
-)
-
-door = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.brown,
-    scale=(1, 3, 0.2),
-    position=(0, 1, -3.01),
-    collider='box',shader=dark_fantasy_shader
-)
-
-window_left = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.azure,
-    scale=(1.2, 1, 0.1),
-    position=(-2, 2, -3.01),shader=dark_fantasy_shader
-)
-
-window_right = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.azure,
-    scale=(1.2, 1, 0.1),
-    position=(2, 2, -3.01),shader=dark_fantasy_shader
-)
-
-roof_left = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.dark_gray,
-    scale=(4.5, 0.6, 6.5),
-    position=(-2.0, 4.5, 0),
-    rotation=(0, 0, -30),shader=dark_fantasy_shader
-)
-roof_right = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.dark_gray,
-    scale=(4.5, 0.6, 6.5),
-    position=(2, 4.5, 0),
-    rotation=(0, 0, 30),shader=dark_fantasy_shader
-)
-
-chimney = Entity(
-    parent=house_left,
-    model='cube',
-    color=color.gray,
-    scale=(0.5, 1.2, 0.5),
-    position=(2.5, 5.1, -1),shader=dark_fantasy_shader
-)
-
-house_collider = Entity(
-    parent=house_left,
-    model='cube',
-    scale=(8.2, 4.5, 6.2),
-    position=(0, 2.25, 0),
-    color=color.clear,
-    collider='box',shader=dark_fantasy_shader
-)
 
 human = Entity(
     parent=scene, position=(-5, 0, 5))
@@ -737,6 +2294,200 @@ button1.enabled = False
 button2.enabled = False
 
 in_dialogue = False
+
+
+def safe_update_enemy_projectiles():
+    """Безопасное обновление снарядов врагов"""
+    current_time = time.time()
+
+    for proj_idx in range(len(enemy_projectiles) - 1, -1, -1):
+        projectile = enemy_projectiles[proj_idx]
+
+        if not projectile or not projectile.enabled:
+            if proj_idx < len(enemy_projectiles):
+                enemy_projectiles.pop(proj_idx)
+            continue
+
+        # Проверяем время жизни
+        if hasattr(projectile, 'creation_time'):
+            age = current_time - projectile.creation_time
+            if age >= projectile.lifetime:
+                if hasattr(projectile, 'glow') and projectile.glow:
+                    destroy(projectile.glow)
+                if hasattr(projectile, 'tracer') and projectile.tracer:
+                    destroy(projectile.tracer)
+                destroy(projectile)
+                enemy_projectiles.pop(proj_idx)
+                continue
+
+        # Движение снаряда
+        projectile.position += projectile.direction * projectile.speed * time.dt
+
+        # Обновляем связанные эффекты
+        if hasattr(projectile, 'glow') and projectile.glow and projectile.glow.enabled:
+            projectile.glow.position = projectile.position
+
+        if hasattr(projectile, 'tracer') and projectile.tracer and projectile.tracer.enabled:
+            projectile.tracer.position = projectile.position - projectile.direction * 0.8
+            projectile.tracer.look_at(projectile.position)
+
+        # Проверка попадания в игрока
+        distance_to_player = (projectile.position - player.position).length()
+        if distance_to_player < 1.5:  # Радиус попадания
+            take_damage(projectile.damage)
+            print(f"💥 Снаряд попал в вас! Урон: {projectile.damage}")
+
+            # Эффект попадания
+            create_blood_effect_optimized(player.position + Vec3(0, 1, 0))
+
+            # Удаляем снаряд
+            if hasattr(projectile, 'glow') and projectile.glow:
+                destroy(projectile.glow)
+            if hasattr(projectile, 'tracer') and projectile.tracer:
+                destroy(projectile.tracer)
+            destroy(projectile)
+            enemy_projectiles.pop(proj_idx)
+
+
+def safe_update_effects():
+    """Обновляет все эффекты (кровь, трассеры, вспышки)"""
+    update_blood_effects_optimized()
+    update_shot_effects()
+    update_explosive_projectiles()
+
+
+def update_blood_effects_optimized():
+    """Оптимизированное обновление эффектов крови"""
+    current_time = time.time()
+
+    # ОГРАНИЧИВАЕМ частоту обновления
+    if hasattr(update_blood_effects_optimized, 'last_update_time'):
+        if current_time - update_blood_effects_optimized.last_update_time < 0.1:  # Только 10 FPS
+            return
+
+    update_blood_effects_optimized.last_update_time = current_time
+
+    cleaned = 0
+    for blood_idx in range(len(blood_effects) - 1, -1, -1):
+        blood_particles = blood_effects[blood_idx]
+
+        if not blood_particles:
+            blood_effects.pop(blood_idx)
+            cleaned += 1
+            continue
+
+        # Быстрая проверка через счетчик
+        valid_particles = 0
+
+        for particle_data in blood_particles[:]:
+            if len(particle_data) == 5:
+                particle, direction, speed, spawn_time, original_size = particle_data
+
+                if particle and particle.enabled:
+                    # БЫСТРАЯ проверка времени жизни
+                    age = current_time - spawn_time
+                    if age < blood_duration:
+                        valid_particles += 1
+
+                        # УПРОЩЕННОЕ обновление (только позиция и прозрачность)
+                        if speed > 0:
+                            particle.position += direction * speed * time.dt
+                            particle.position.y -= time.dt * blood_gravity
+
+                        progress = age / blood_duration
+                        particle.alpha = 1.0 - progress
+                        particle.scale = original_size * (1 - progress * 0.3)
+                    else:
+                        destroy(particle)
+                        cleaned += 1
+                else:
+                    cleaned += 1
+
+        # Удаляем пустые группы
+        if valid_particles == 0:
+            blood_effects.pop(blood_idx)
+            cleaned += 1
+
+    # Очистка раз в 10 секунд если слишком много
+    if cleaned > 0 or len(blood_effects) > 20:
+        print(f"🩸 Оптимизация крови: {len(blood_effects)} групп, очищено {cleaned}")
+
+
+def update_enemies():
+    """Обновляет всех врагов"""
+    for enemy in enemies[:]:
+        if not enemy or not enemy.entity or not enemy.entity.enabled:
+            continue
+
+        # Проверяем время последнего обновления для оптимизации
+        current_time = time.time()
+        if current_time - enemy.last_update_time < enemy.update_interval:
+            continue
+
+        enemy.last_update_time = current_time
+
+        dist_to_player = (enemy.entity.position - player.position).length()
+
+        if dist_to_player <= enemy.detection_range:
+            enemy.is_chasing = True
+
+            if dist_to_player > enemy.attack_range:
+                target_height = 1.5  # На сколько выше ног идти
+                target_point = player.position + Vec3(0, target_height, 0)
+
+                # 2. Двигаемся к этой точке
+                direction = (target_point - enemy.entity.position).normalized()
+                enemy.entity.position += direction * enemy.chase_speed * time.dt
+
+                # 3. Поворачиваемся смотреть на игрока (только горизонталь)
+                # Берем направление в 2D (XZ плоскость), игнорируем высоту
+                dx = player.position.x - enemy.entity.position.x
+                dz = player.position.z - enemy.entity.position.z
+
+                if abs(dz) > 0.001:  # Маленькое число вместо 0
+                    angle_y = math.degrees(math.atan2(dx, dz))
+                    enemy.entity.rotation_y = angle_y  # Попробуй с минусом или без
+
+                # 4. Убираем наклоны
+                enemy.entity.rotation_x = 0
+                enemy.entity.rotation_z = 0
+
+            if dist_to_player <= enemy.attack_range:
+                if current_time - enemy.last_attack_time >= enemy.attack_cooldown:
+                    attack_player(enemy)
+                    enemy.last_attack_time = current_time
+
+            # Проверка застревания
+            check_enemy_stuck(enemy)
+
+            # Обновляем визуал
+            update_enemy_visuals(enemy)
+
+            # Специальные атаки для босса
+            if enemy.type == "boss":
+                # Атака волной
+                if dist_to_player <= enemy.wave_attack_range:
+                    if current_time - enemy.last_special_attack_time >= enemy.special_attack_cooldown:
+                        boss_special_attack(enemy)
+                        enemy.last_special_attack_time = current_time
+
+                # Атака с разбегом
+                if dist_to_player <= enemy.ranged_attack_range:
+                    if current_time - enemy.last_charge_attack_time >= enemy.charge_attack_cooldown:
+                        boss_charge_attack(enemy)
+                        enemy.last_charge_attack_time = current_time
+
+                # Дистанционная атака
+                if dist_to_player > enemy.attack_range and dist_to_player <= enemy.ranged_attack_range:
+                    if current_time - enemy.last_attack_time >= enemy.attack_cooldown * 0.5:
+                        boss_ranged_attack(enemy)
+                        enemy.last_attack_time = current_time
+
+            # Дистанционная атака для средних врагов
+            elif enemy.type == "medium" and dist_to_player > enemy.attack_range and dist_to_player <= enemy.ranged_attack_range:
+                if current_time - enemy.last_attack_time >= enemy.attack_cooldown:
+                    ranged_attack(enemy)
+                    enemy.last_attack_time = current_time
 
 
 def start_stage_animation(stage_number):
@@ -782,8 +2533,6 @@ def start_stage_animation(stage_number):
         text=f"STAGE {stage_number}",
         scale=4,
         color=color.white,
-        background=(animation_type == "next_stage"),  # Фон только для Stage 2+
-        background_color=color.rgba(0, 0, 0, 0.7),
         z=-2,
         origin=(0, 0),
         font='custom2.ttf'
@@ -843,8 +2592,6 @@ def finish_stage_animation():
 
     print(f"✅ Анимация завершена, спавним врагов для Stage {current_stage}...")
 
-
-
     # Скрываем элементы
     if stage_animation["black_screen"]:
         stage_animation["black_screen"].enabled = False
@@ -888,7 +2635,6 @@ def finish_stage_animation():
         print(f"🎁 Бонусы на stage {current_stage}!")
 
 
-
 def update_stage():
     """Простая логика обновления стадии"""
     global stage_enemies_spawned, stage_enemies_killed, enemies_to_kill_for_stage
@@ -901,6 +2647,7 @@ def update_stage():
     # ЗАПУСКАЕМ АНИМАЦИЮ ДЛЯ ТЕКУЩЕЙ СТАДИИ
     print(f"🎬 Запускаем анимацию для Stage {current_stage}")
     start_stage_animation(current_stage)
+
 
 def show_mission_text(text):
     global current_mission_text
@@ -930,9 +2677,11 @@ def hide_mission_text():
     if current_mission_text:
         destroy(current_mission_text)
         current_mission_text = None
+
+
 def spawn_dual_uzi_pickup():
     """Спавнит Dual Uzi на карте"""
-    spawn_position = find_valid_spawn_position()
+    spawn_position = (-66, 1.5, -163)
 
     # Создаем модель Dual Uzi
     dual_uzi_pickup = Entity(
@@ -956,7 +2705,7 @@ def spawn_dual_uzi_pickup():
             dual_uzi_pickup.animate_y(dual_uzi_pickup.y + 0.4, duration=1.5, curve=curve.in_out_quad)
             # Анимация вниз через 1.5 секунды
             invoke(lambda: dual_uzi_pickup.animate_y(dual_uzi_pickup.y - 0.4, duration=1.5, curve=curve.in_out_quad)
-                   if dual_uzi_pickup and dual_uzi_pickup.enabled else None, delay=1.5)
+            if dual_uzi_pickup and dual_uzi_pickup.enabled else None, delay=1.5)
             # Повторяем всю последовательность через 3 секунды
             invoke(float_weapon, delay=3.0)
 
@@ -988,6 +2737,8 @@ def spawn_dual_uzi_pickup():
 
     print("🔫 Dual Uzi заспавнен на карте! Найдите его!")
     return dual_uzi_pickup
+
+
 def spawn_grenade_launcher_pickup():
     """Спавнит гранатомет на карте"""
     spawn_position = find_valid_spawn_position()
@@ -1004,7 +2755,8 @@ def spawn_grenade_launcher_pickup():
     # АНИМАЦИЯ ВРАЩЕНИЯ
     def rotate_weapon():
         if grenade_launcher_pickup and grenade_launcher_pickup.enabled:
-            grenade_launcher_pickup.animate_rotation_y(grenade_launcher_pickup.rotation_y + 360, duration=3, curve=curve.linear)
+            grenade_launcher_pickup.animate_rotation_y(grenade_launcher_pickup.rotation_y + 360, duration=3,
+                                                       curve=curve.linear)
             invoke(rotate_weapon, delay=3)
 
     # АНИМАЦИЯ ПЛАВАНИЯ ВВЕРХ-ВНИЗ
@@ -1013,8 +2765,9 @@ def spawn_grenade_launcher_pickup():
             # Анимация вверх
             grenade_launcher_pickup.animate_y(grenade_launcher_pickup.y + 0.4, duration=1.5, curve=curve.in_out_quad)
             # Анимация вниз через 1.5 секунды
-            invoke(lambda: grenade_launcher_pickup.animate_y(grenade_launcher_pickup.y - 0.4, duration=1.5, curve=curve.in_out_quad)
-                   if grenade_launcher_pickup and grenade_launcher_pickup.enabled else None, delay=1.5)
+            invoke(lambda: grenade_launcher_pickup.animate_y(grenade_launcher_pickup.y - 0.4, duration=1.5,
+                                                             curve=curve.in_out_quad)
+            if grenade_launcher_pickup and grenade_launcher_pickup.enabled else None, delay=1.5)
             # Повторяем всю последовательность через 3 секунды
             invoke(float_weapon, delay=3.0)
 
@@ -1089,7 +2842,10 @@ def spawn_stage_enemies_simple():
             print(f"👑 БОСС добавлен! ({current_boss_count + i + 1}/{boss_count})")
 
     print(f"📊 Теперь врагов на карте: {total_enemies_on_map}")
-    print(f"🎯 Состав: {count_enemies_by_type('normal')} слабых, {count_enemies_by_type('medium')} средних, {count_enemies_by_type('boss')} боссов")
+    print(
+        f"🎯 Состав: {count_enemies_by_type('normal')} слабых, {count_enemies_by_type('medium')} средних, {count_enemies_by_type('boss')} боссов")
+
+
 # ФУНКЦИЯ ДЛЯ ПОДСЧЕТА ВРАГОВ ПО ТИПУ
 def count_enemies_by_type(enemy_type):
     count = 0
@@ -1126,6 +2882,7 @@ def check_stage_completion():
 
         print(f"🔄 Stage {current_stage} начинается...")
 
+
 def spawn_enemy_at_random_position(enemy_type):
     try:
         # Генерируем случайную позицию на карте
@@ -1143,32 +2900,58 @@ def spawn_enemy_at_random_position(enemy_type):
     except:
         return False
 
-# ФУНКЦИЯ СПАВНА ХИЛОК (каждые 5 стейджей)
+
 def spawn_healkits():
     print(f"💚 Спавн 2 хилки на stage {current_stage}")
 
+    spawned_count = 0
     for i in range(2):
-        x = random.uniform(-20, 20)
-        z = random.uniform(-20, 20)
-        position = (x, 1, z)
+        position = find_valid_spawn_position()
 
-        # Проверяем дистанцию до игрока
-        if (Vec3(position) - player.position).length() > 5:
+        if is_position_in_spawn_area(position):
             create_heal_pickup(position)
+            spawned_count += 1
+            print(f"  Аптечка {i + 1}: X={position.x:.1f}, Z={position.z:.1f}")
+        else:
+            print(f"❌ Аптечка вне зон: X={position.x:.1f}, Z={position.z:.1f}")
+            # Исправляем позицию
+            corrected_pos = find_valid_spawn_position()
+            create_heal_pickup(corrected_pos)
+            spawned_count += 1
+
+    print(f"✅ Заспавнено {spawned_count} аптечек")
 
 
-# ФУНКЦИЯ СПАВНА КОРОБОК С ПАТРОНАМИ (каждые 5 стейджей)
 def spawn_ammo_boxes():
     print(f"🔫 Спавн 4 коробки патронов на stage {current_stage}")
 
+    spawned_count = 0
     for i in range(4):
-        x = random.uniform(-20, 20)
-        z = random.uniform(-20, 20)
-        position = (x, 0.5, z)
+        position = find_valid_spawn_position()
 
-        # Проверяем дистанцию до игрока
-        if (Vec3(position) - player.position).length() > 5:
+        if is_position_in_spawn_area(position):
             create_ammo_pickup(position)
+            spawned_count += 1
+            print(f"  Патроны {i + 1}: X={position.x:.1f}, Z={position.z:.1f}")
+        else:
+            print(f"❌ Патроны вне зон: X={position.x:.1f}, Z={position.z:.1f}")
+            # Исправляем позицию
+            corrected_pos = find_valid_spawn_position()
+            create_ammo_pickup(corrected_pos)
+            spawned_count += 1
+
+    print(f"✅ Заспавнено {spawned_count} коробок патронов")
+
+
+def is_position_in_spawn_area(position):
+    """Проверяет, находится ли позиция в одной из двух областей спавна"""
+    # ПРОВЕРКА ПЕРВОЙ ЗОНЫ
+    in_zone1 = (43 <= position.x <= 63 and -116 <= position.z <= -46)
+
+    # ПРОВЕРКА ВТОРОЙ ЗОНЫ
+    in_zone2 = (-56 <= position.x <= -6 and -203 <= position.z <= -153)
+
+    return in_zone1 or in_zone2
 
 
 # ОБНОВЛЯЕМ ФУНКЦИЮ УБИЙСТВА ВРАГА
@@ -1200,95 +2983,61 @@ def create_enemy(position, enemy_type="normal"):
             if enemy in enemies:
                 enemies.remove(enemy)
 
-
-
-
-
-
     # Присваиваем кастомную функцию уничтожения
     enemy_entity.destroy = custom_destroy
 
     return enemy
 
 
-# Исправляем функцию создания снарядов врагов
-# УЛУЧШЕННАЯ функция создания снарядов врагов
-def create_enemy_projectile(position, direction, speed, damage, color_type="normal"):
-    # Основной снаряд
+def create_homing_enemy_projectile(position, target_position, speed=ENEMY_PROJECTILE_SPEED, damage=8,
+                                   color_type=color.rgba(1, 0.6, 0.2, 1), homing_strength=1.0, explosion_radius=3.0):
+    """Создает снаряд врага который целится в тело игрока"""
+
+    # Целимся в тело (высота 1.8 вместо ног)
+    corrected_target = Vec3(
+        target_position.x,
+        target_position.y + 1.8,  # ТЕЛО, а не ноги
+        target_position.z
+    )
+
+    actual_speed = uniform(ENEMY_PROJECTILE_MIN_SPEED, speed)
+
     projectile = Entity(
         model='sphere',
         color=color_type,
-        scale=0.8,  # Увеличил размер в 2.5 раза
+        scale=0.9,
         position=position,
-        add_to_scene_entities=True
+        add_to_scene_entities=True,
+        eternal=False
     )
 
-    # ЭФФЕКТ СВЕЧЕНИЯ вокруг снаряда
     glow = Entity(
         model='sphere',
-        color=color_type,
-        scale=1.2,  # Немного больше основного снаряда
+        color=color.rgba(color_type[0], color_type[1], color_type[2], 0.5),
+        scale=1.2,
         position=position,
-        add_to_scene_entities=True
+        add_to_scene_entities=True,
+        eternal=False
     )
-    glow.alpha = 0.3  # Полупрозрачное свечение
 
-    # ТРАССЕР за снарядом
-    tracer = Entity(
-        model='cube',
-        color=lerp(color_type, color.white, 0.5),
-        scale=(0.2, 0.2, 0.8),
-        position=position - direction * 0.5,
-        add_to_scene_entities=True
-    )
+    # Направление к телу
+    direction = (corrected_target - position).normalized()
 
     projectile.direction = direction
-    projectile.speed = speed
+    projectile.speed = actual_speed
     projectile.damage = damage
     projectile.creation_time = time.time()
-    projectile.lifetime = 5.0
-    projectile.glow = glow  # Сохраняем эффекты как дочерние объекты
-    projectile.tracer = tracer
+    projectile.lifetime = 8.0
+    projectile.homing_strength = homing_strength
+    projectile.glow = glow
+    projectile.explosion_radius = explosion_radius
+    projectile.homing_active = True
+    projectile.turn_speed = ENEMY_PROJECTILE_TURN_SPEED
+    projectile.detection_radius = ENEMY_PROJECTILE_DETECTION_RADIUS
+    projectile.has_exploded = False
 
     enemy_projectiles.append(projectile)
     return projectile
-
-
-# Функция для создания кровавого эффекта
-# Исправляем функцию create_blood_effect (строка 491)
-def create_blood_effect(position):
-    blood_particles = []
-
-    for j in range(blood_particle_count):  # меняем i на j
-        particle_size = uniform(0.15, 0.4)
-
-        if random.random() > 0.7:
-            model_type = 'sphere'
-        else:
-            model_type = 'cube'
-
-        particle = Entity(
-            model=model_type,
-            color=color.rgba(0.6, 0, 0, 1),
-            scale=particle_size,
-            position=position,
-            add_to_scene_entities=True
-        )
-
-        blood_direction = Vec3(
-            uniform(-2, 2),
-            uniform(1, 4),
-            uniform(-2, 2)
-        ).normalized()
-
-        particle_speed = uniform(blood_speed * 0.7, blood_speed * 1.3)
-
-        blood_particles.append((particle, blood_direction, particle_speed, time.time(), particle_size))
-
-    blood_effects.append(blood_particles)
-    create_blood_puddle(position)
-    create_blood_splatters(position)
-    return blood_particles
 
 
 # Функция для создания лужи крови
@@ -1351,7 +3100,7 @@ def check_bullet_hits():
         for enemy_idx in range(len(enemies) - 1, -1, -1):
             enemy = enemies[enemy_idx]
 
-            if not enemy or not enemy.entity.enabled:
+            if not enemy or not enemy.entity or not enemy.entity.enabled:
                 continue
 
             dist_to_enemy = (tracer.position - enemy.entity.position).length()
@@ -1360,94 +3109,245 @@ def check_bullet_hits():
                 enemy.health -= 1
 
                 print(f"🎯 Попадание в {enemy.type} врага! Здоровье: {enemy.health}/{enemy.max_health}")
-                create_blood_effect(enemy.entity.position + Vec3(0, 1, 0))
+
+                try:
+                    create_blood_effect_optimized(enemy.entity.position + Vec3(0, 1, 0))
+                except Exception as e:
+                    print(f"⚠️ Ошибка создания эффекта крови: {e}")
 
                 if enemy.health <= 0:
                     print(f"💀 {enemy.type.capitalize()} враг уничтожен!")
-                    create_blood_effect(enemy.entity.position + Vec3(0, 1, 0))
+
+                    try:
+                        create_blood_effect_optimized(enemy.entity.position + Vec3(0, 1, 0))
+                    except:
+                        pass
 
                     # ВЫЗЫВАЕМ ФУНКЦИЮ УБИЙСТВА ПЕРЕД УДАЛЕНИЕМ
                     on_enemy_killed()
 
                     # Уничтожаем врага
-                    destroy(enemy.entity)
+                    try:
+                        destroy(enemy.entity)
+                    except:
+                        pass
+
                     if enemy in enemies:
                         enemies.remove(enemy)
 
-                destroy(tracer)
+                try:
+                    destroy(tracer)
+                except:
+                    pass
+
                 bullet_tracers.pop(bullet_idx)
                 break
 
 
-# УБИРАЕМ старую функцию update_enemy_projectiles и ЗАМЕНЯЕМ на эту:
-# УЛУЧШЕННАЯ система попадания снарядов
-# ИСПРАВЛЯЕМ ФУНКЦИЮ ОБНОВЛЕНИЯ СНАРЯДОВ
 def update_enemy_projectiles():
+    """Обновляет снаряды врагов с очень слабым наведением"""
     current_time = time.time()
 
     for proj_idx in range(len(enemy_projectiles) - 1, -1, -1):
         projectile = enemy_projectiles[proj_idx]
 
-        # ПРОВЕРЯЕМ ЧТО СНАРЯД ЕЩЕ СУЩЕСТВУЕТ
         if not projectile or not projectile.enabled:
-            if proj_idx < len(enemy_projectiles):
-                enemy_projectiles.pop(proj_idx)
+            cleanup_projectile_effects(projectile)
+            enemy_projectiles.pop(proj_idx)
             continue
 
-        # Сохраняем старую позицию ДО движения
-        old_position = Vec3(projectile.position)
+        # Обеспечиваем наличие всех атрибутов
+        ensure_projectile_attributes(projectile)
 
-        # АВТОНАВОДКА
-        if hasattr(projectile, 'homing_active') and projectile.homing_active:
-            direction_to_player = (player.position - projectile.position).normalized()
-            projectile.direction = lerp(projectile.direction, direction_to_player,
-                                        projectile.homing_strength * time.dt)
-            projectile.direction = projectile.direction.normalized()
-
-        # Движение снаряда
-        projectile.position += projectile.direction * projectile.speed * time.dt
-
-        # Обновляем эффекты если они есть
-        if hasattr(projectile, 'glow') and projectile.glow and projectile.glow.enabled:
-            projectile.glow.position = projectile.position
-            pulse = math.sin(time.time() * 10) * 0.1 + 0.9
-            projectile.glow.scale = 0.8 * pulse
-
-        if hasattr(projectile, 'tracer') and projectile.tracer and projectile.tracer.enabled:
-            projectile.tracer.position = projectile.position - projectile.direction * 0.8
-            projectile.tracer.look_at(projectile.position)
+        age = current_time - projectile.creation_time
 
         # Проверка времени жизни
-        if current_time - projectile.creation_time >= projectile.lifetime:
-            if projectile.enabled:  # Проверяем что еще не уничтожен
-                create_projectile_explosion(projectile.position)
-                destroy(projectile)
-                if hasattr(projectile, 'glow') and projectile.glow:
-                    destroy(projectile.glow)
-                if hasattr(projectile, 'tracer') and projectile.tracer:
-                    destroy(projectile.tracer)
-            if proj_idx < len(enemy_projectiles):
-                enemy_projectiles.pop(proj_idx)
+        if age >= projectile.lifetime:
+            explosion_radius = getattr(projectile, 'explosion_radius', 3.0)
+            create_projectile_explosion(projectile.position, explosion_radius)
+            cleanup_projectile_effects(projectile)
+            enemy_projectiles.pop(proj_idx)
             continue
 
-        # ПРОВЕРКА ПОПАДАНИЯ В ИГРОКА (только если снаряд еще существует)
-        if projectile.enabled:
-            hit_player = check_projectile_hit(projectile, old_position, projectile.position)
+        # ВАЖНОЕ ИЗМЕНЕНИЕ: ОЧЕНЬ СЛАБЫЙ ХОМИНГ
+        if hasattr(projectile, 'is_homing') and projectile.is_homing:
+            # Проверяем расстояние до игрока - наводимся только если близко
+            distance_to_player = (projectile.position - player.position).length()
 
-            if hit_player:
-                take_damage(projectile.damage)
-                create_projectile_explosion(projectile.position)
-                create_blood_effect(player.position + Vec3(0, 1, 0))
+            # Наводимся только если снаряд далеко от игрока (> 10 единиц) или первые 2 секунды полета
+            if distance_to_player > 10 or age < 2.0:
+                # Очень слабое наведение
+                if not hasattr(projectile, 'turn_speed'):
+                    projectile.turn_speed = ENEMY_PROJECTILE_TURN_SPEED
 
-                # Уничтожаем снаряд
-                destroy(projectile)
-                if hasattr(projectile, 'glow') and projectile.glow:
-                    destroy(projectile.glow)
-                if hasattr(projectile, 'tracer') and projectile.tracer:
-                    destroy(projectile.tracer)
+                # Направление к игроку
+                to_player = (player.position - projectile.position).normalized()
 
-                if proj_idx < len(enemy_projectiles):
-                    enemy_projectiles.pop(proj_idx)
+                # Очень медленная коррекция (10% от обычной)
+                correction_strength = 0.1 * projectile.turn_speed * time.dt
+                projectile.direction = lerp(projectile.direction, to_player, correction_strength).normalized()
+            else:
+                # Близко к игроку - летим прямо
+                pass
+
+        # ДВИЖЕНИЕ СНАРЯДА С ГРАВИТАЦИЕЙ
+        if hasattr(projectile, 'direction') and hasattr(projectile, 'speed'):
+            # Обновляем вертикальную скорость от гравитации
+            if hasattr(projectile, 'gravity'):
+                projectile.velocity_y += projectile.gravity * time.dt
+                # Обновляем направление с учетом вертикальной скорости
+                move_direction = Vec3(
+                    projectile.direction.x,
+                    projectile.direction.y + projectile.velocity_y * 0.1,
+                    projectile.direction.z
+                ).normalized()
+            else:
+                move_direction = projectile.direction
+
+            # Медленное движение
+            projectile.position += move_direction * projectile.speed * time.dt
+
+        # ВРАЩЕНИЕ (медленное)
+        projectile.rotation_x += time.dt * 50
+        projectile.rotation_y += time.dt * 40
+
+        # ОБНОВЛЕНИЕ СВЕЧЕНИЯ
+        if hasattr(projectile, 'glow') and projectile.glow and projectile.glow.enabled:
+            projectile.glow.position = projectile.position
+
+            # Мерцание
+            pulse = math.sin(time.time() * 3) * 0.1 + 0.9
+            projectile.glow.scale = 1.3 * pulse
+            projectile.glow.color = color.rgba(
+                projectile.glow.color.r,
+                projectile.glow.color.g,
+                projectile.glow.color.b,
+                0.3 + 0.2 * pulse
+            )
+
+        # Проверка приближения к игроку
+        distance_to_player = (projectile.position - player.position).length()
+        detection_radius = getattr(projectile, 'detection_radius', ENEMY_PROJECTILE_DETECTION_RADIUS)
+
+        # Если снаряд близко к игроку - взрыв
+        if distance_to_player < detection_radius and not getattr(projectile, 'has_exploded', False):
+            print(f"💥 Снаряд приблизился на {distance_to_player:.1f} единиц!")
+
+            damage = getattr(projectile, 'damage', 8)
+            take_damage(damage)
+
+            # Взрыв
+            explosion_radius = getattr(projectile, 'explosion_radius', 3.0)
+            create_projectile_explosion(projectile.position, explosion_radius)
+
+            projectile.has_exploded = True
+            cleanup_projectile_effects(projectile)
+            enemy_projectiles.pop(proj_idx)
+            continue
+
+        # Столкновение с землей
+        if projectile.position.y < 0.5:
+            explosion_radius = getattr(projectile, 'explosion_radius', 3.0)
+            create_projectile_explosion(projectile.position, explosion_radius)
+            cleanup_projectile_effects(projectile)
+            enemy_projectiles.pop(proj_idx)
+
+
+def ensure_projectile_attributes(projectile):
+    """Обеспечивает, что у снаряда есть все необходимые атрибуты"""
+    if not hasattr(projectile, 'explosion_radius'):
+        projectile.explosion_radius = 3.0
+    if not hasattr(projectile, 'detection_radius'):
+        projectile.detection_radius = ENEMY_PROJECTILE_DETECTION_RADIUS
+    if not hasattr(projectile, 'speed'):
+        projectile.speed = uniform(ENEMY_PROJECTILE_MIN_SPEED, ENEMY_PROJECTILE_SPEED)
+    if not hasattr(projectile, 'damage'):
+        projectile.damage = 8
+    if not hasattr(projectile, 'lifetime'):
+        projectile.lifetime = 10.0
+    if not hasattr(projectile, 'has_exploded'):
+        projectile.has_exploded = False
+    if not hasattr(projectile, 'is_homing'):
+        projectile.is_homing = True
+    if not hasattr(projectile, 'turn_speed'):
+        projectile.turn_speed = ENEMY_PROJECTILE_TURN_SPEED
+    if not hasattr(projectile, 'direction'):
+        projectile.direction = Vec3(0, 0, -1)
+    if not hasattr(projectile, 'gravity'):
+        projectile.gravity = -0.5
+    if not hasattr(projectile, 'velocity_y'):
+        projectile.velocity_y = 0
+    if not hasattr(projectile, 'homing_strength'):
+        projectile.homing_strength = 0.5
+
+
+def cleanup_projectile_effects(projectile):
+    """Очищает все эффекты связанные со снарядом"""
+    if not projectile:
+        return
+
+    # Список связанных объектов
+    related_objects = []
+
+    # Добавляем все возможные связанные объекты
+    if hasattr(projectile, 'glow'):
+        related_objects.append(projectile.glow)
+
+    if hasattr(projectile, 'tracer'):
+        related_objects.append(projectile.tracer)
+    if hasattr(projectile, 'particles'):
+        related_objects.extend(projectile.particles)
+
+    # Уничтожаем основной снаряд
+    try:
+        destroy(projectile)
+    except:
+        pass
+
+    # Уничтожаем связанные объекты
+    for obj in related_objects:
+        if obj and hasattr(obj, 'enabled') and obj.enabled:
+            try:
+                destroy(obj)
+            except:
+                pass
+
+
+def convert_old_projectiles():
+    """Преобразует старые снаряды в новые с атрибутами"""
+    for projectile in enemy_projectiles:
+        if not hasattr(projectile, 'turn_speed'):
+            # Добавляем недостающие атрибуты
+            projectile.turn_speed = 5.0
+            projectile.homing_strength = 1.0
+            projectile.homing_active = True
+            projectile.explosion_radius = 3.0
+
+            # Если нет направления, создаем случайное
+            if not hasattr(projectile, 'direction'):
+                projectile.direction = Vec3(
+                    uniform(-0.5, 0.5),
+                    uniform(-0.2, 0.5),
+                    uniform(-1, -0.5)
+                ).normalized()
+
+            # Если нет скорости
+            if not hasattr(projectile, 'speed'):
+                projectile.speed = uniform(8, 12)
+
+            # Если нет урона
+            if not hasattr(projectile, 'damage'):
+                projectile.damage = 10
+
+            # Если нет времени создания
+            if not hasattr(projectile, 'creation_time'):
+                projectile.creation_time = time.time()
+
+            # Если нет времени жизни
+            if not hasattr(projectile, 'lifetime'):
+                projectile.lifetime = 4.0
+
+            print(f"🔧 Преобразован старый снаряд")
 
 
 def create_bounce_effect(position):
@@ -1488,6 +3388,7 @@ def create_bounce_effect(position):
 
         animate_bounce()
 
+
 def check_projectile_hit(projectile, old_pos, new_pos):
     # Простая проверка расстояния до игрока
     distance_to_player = (projectile.position - player.position).length()
@@ -1507,124 +3408,165 @@ def check_projectile_hit(projectile, old_pos, new_pos):
     return False
 
 
-def create_projectile_explosion(position):
-    for j in range(8):
-        explosion_particle = Entity(
+def create_projectile_explosion(position, radius=3.0):
+    """Создает эффект взрыва снаряда"""
+    # ВСЕГДА используем защиту от ошибок
+    try:
+        if not position:
+            position = Vec3(0, 0, 0)
+
+        print(f"💥 Взрыв снаряда! Радиус: {radius}")
+
+        # Основной взрыв
+        explosion = Entity(
             model='sphere',
-            color=lerp(color.orange, color.yellow, random.random()),
-            scale=uniform(0.4, 0.8),
+            color=color.orange,
+            scale=0.1,
             position=position,
-            add_to_scene_entities=True
+            add_to_scene_entities=True,
+            eternal=False
         )
 
-        explosion_direction = Vec3(
-            uniform(-1, 1),
-            uniform(-0.5, 1),
-            uniform(-1, 1)
-        ).normalized()
+        # Анимация расширения взрыва
+        explosion.animate_scale(radius * 2, duration=0.3, curve=curve.out_quad)
+        explosion.animate_color(color.red, duration=0.2)
 
-        explosion_speed = uniform(4, 10)
-        explosion_lifetime = uniform(0.8, 1.2)
+        # Вспышка в центре
+        flash = Entity(
+            model='sphere',
+            color=color.yellow,
+            scale=0.2,
+            position=position,
+            add_to_scene_entities=True,
+            eternal=False
+        )
+        flash.animate_scale(radius, duration=0.15)
+        flash.animate_color(color.rgba(1, 1, 0, 0), duration=0.15)
 
-        def animate_explosion(particle=explosion_particle, direction=explosion_direction,
-                              speed=explosion_speed, lifetime=explosion_lifetime):
-            start_time = time.time()
-            start_scale = particle.scale
+        # Партиклы взрыва
+        for i in range(8):  # Меньше частиц для производительности
+            particle = Entity(
+                model='cube',
+                color=lerp(color.orange, color.yellow, random.random()),
+                scale=uniform(0.2, 0.4),
+                position=position,
+                add_to_scene_entities=True,
+                eternal=False
+            )
 
-            def update_explosion():
-                current_time = time.time()
-                age = current_time - start_time
+            direction = Vec3(
+                uniform(-1, 1),
+                uniform(0, 1),
+                uniform(-1, 1)
+            ).normalized()
 
-                if age < lifetime and particle.enabled:
-                    particle.position += direction * speed * time.dt
-                    progress = age / lifetime
-                    particle.scale = start_scale * (1 - progress)
-                    particle.alpha = 1 - progress
-                    invoke(update_explosion, delay=1 / 60)
-                else:
-                    destroy(particle)
+            speed = uniform(3, 8)
+            lifetime = uniform(0.5, 1.0)
 
-            update_explosion()
+            animate_explosion_particle(particle, direction, speed, lifetime)
 
-        animate_explosion()
+        # Удаление эффектов
+        def cleanup_explosion():
+            try:
+                if explosion and explosion.enabled:
+                    destroy(explosion)
+                if flash and flash.enabled:
+                    destroy(flash)
+            except:
+                pass
 
+        invoke(cleanup_explosion, delay=1.0)
 
-# Функция для обновления NPC
-# ОБНОВЛЯЕМ ФУНКЦИЮ update_enemies ДЛЯ БОССА
-def update_enemies():
-    current_time = time.time()
+        # Урон игроку если он в радиусе взрыва
+        try:
+            distance_to_player = (position - player.position).length()
+            if distance_to_player < radius:
+                damage = int(25 * (1 - distance_to_player / radius))
+                if damage > 0:
+                    print(f"💥 Взрывная волна! Урон: {damage}")
+                    take_damage(damage)
 
-    for enemy_obj in enemies[:]:  # меняем enemy на enemy_obj
-        if not enemy_obj or not enemy_obj.entity or not enemy_obj.entity.enabled:
-            if enemy_obj in enemies:
-                enemies.remove(enemy_obj)
-            continue
+                    # Отбрасывание игрока
+                    push_direction = (player.position - position).normalized()
+                    push_strength = 8 * (1 - distance_to_player / radius)
+                    player.position += push_direction * push_strength * time.dt * 3
+        except:
+            pass
 
-        enemy_entity = enemy_obj.entity  # меняем entity на enemy_entity
-        dist_to_player = (enemy_entity.position - player.position).length()  # меняем distance на dist_to_player
+    except Exception as e:
+        print(f"⚠️ Ошибка при создании взрыва: {e}")
 
-        if dist_to_player <= enemy_obj.detection_range:
-            enemy_obj.is_chasing = True
+    # Удаление эффектов
+    def cleanup_explosion():
+        if explosion and explosion.enabled:
+            destroy(explosion)
+        if flash and flash.enabled:
+            destroy(flash)
 
-            if dist_to_player > enemy_obj.attack_range:
-                direction_to_player = (player.position - enemy_entity.position).normalized()
-                enemy_entity.position += direction_to_player * enemy_obj.chase_speed * time.dt
-                enemy_entity.look_at(Vec3(player.position.x, enemy_entity.position.y, player.position.z))
+    invoke(cleanup_explosion, delay=1.0)
 
-            if enemy_obj in enemies and enemy_obj.entity.enabled and dist_to_player <= enemy_obj.attack_range:
-                if current_time - enemy_obj.last_attack_time >= enemy_obj.attack_cooldown:
-                    attack_player(enemy_obj)
-                    enemy_obj.last_attack_time = current_time
+    # Урон игроку если он в радиусе взрыва
+    distance_to_player = (position - player.position).length()
+    if distance_to_player < radius:
+        damage = int(30 * (1 - distance_to_player / radius))  # Уменьшение урона с расстоянием
+        if damage > 0:
+            print(f"💥 Взрывная волна! Урон: {damage}")
+            take_damage(damage)
 
-            if enemy_obj.type == "medium" and enemy_obj in enemies and enemy_obj.entity.enabled and dist_to_player <= enemy_obj.ranged_attack_range:
-                if current_time - enemy_obj.last_attack_time >= enemy_obj.attack_cooldown * 1.5:
-                    ranged_attack(enemy_obj)
-                    enemy_obj.last_attack_time = current_time
-
-            if enemy_obj.type == "boss" and enemy_obj in enemies and enemy_obj.entity.enabled:
-                if dist_to_player <= enemy_obj.wave_attack_range:
-                    if current_time - enemy_obj.last_special_attack_time >= enemy_obj.special_attack_cooldown:
-                        boss_special_attack(enemy_obj)
-                        enemy_obj.last_special_attack_time = current_time
-
-                if dist_to_player <= enemy_obj.ranged_attack_range:
-                    if current_time - enemy_obj.last_attack_time >= enemy_obj.attack_cooldown * 1.2:
-                        boss_ranged_attack(enemy_obj)
-                        enemy_obj.last_attack_time = current_time
-
-                if current_time - enemy_obj.last_charge_attack_time >= enemy_obj.charge_attack_cooldown:
-                    boss_charge_attack(enemy_obj)
-                    enemy_obj.last_charge_attack_time = current_time
-
-        else:
-            enemy_obj.is_chasing = False
-
-        check_enemy_stuck(enemy_obj)
-        update_enemy_visuals(enemy_obj)
+            # Отбрасывание игрока
+            push_direction = (player.position - position).normalized()
+            push_strength = 10 * (1 - distance_to_player / radius)
+            player.position += push_direction * push_strength * time.dt * 5
 
 
 def boss_ranged_attack(enemy):
-    print("🎯 БОСС выпускает энергетические снаряды!")
+    """Атака босса снарядами в тело"""
+    for i in range(3):
+        delay = i * 0.3
 
-    # Ярко-красные снаряды босса
-    boss_color = color.rgba(1, 0.1, 0.1, 1)
+        def create_delayed_shot(d=i):
+            if enemy not in enemies or not enemy.entity.enabled:
+                return
 
-    create_homing_projectile(
-        enemy.entity.position + Vec3(-1, 3, 0),
-        (player.position - enemy.entity.position).normalized(),
-        speed=13.0,
-        damage=10,
-        color_type=boss_color,
-        homing_strength=3.0
-    )
+            offset = Vec3(
+                (d - 1) * 1.5,
+                3,
+                0
+            )
 
-    create_homing_projectile(
-        enemy.entity.position + Vec3(1, 3, 0),
-        (player.position - enemy.entity.position).normalized(),
-        speed=13.0,
-        damage=10,
-        color_type=boss_color,
-        homing_strength=3.0
+            projectile = create_homing_enemy_projectile(
+                position=enemy.entity.position + offset,
+                target_position=Vec3(player.position.x, player.position.y + 1.8, player.position.z),  # ТЕЛО
+                speed=12.0,
+                damage=15,
+                color_type=color.rgba(1, 0.1, 0.1, 1),
+                homing_strength=1.5,
+                explosion_radius=4.0
+            )
+
+        invoke(create_delayed_shot, delay=delay)
+
+
+def ranged_attack(enemy):
+    """Атака среднего врага снарядами в тело"""
+    current_time = time.time()
+
+    if not hasattr(enemy, 'last_ranged_attack_time'):
+        enemy.last_ranged_attack_time = 0
+
+    if current_time - enemy.last_ranged_attack_time < ENEMY_PROJECTILE_COOLDOWN:
+        return
+
+    enemy.last_ranged_attack_time = current_time
+
+    projectile = create_homing_enemy_projectile(
+        position=enemy.entity.position + Vec3(0, 2, 0),
+        target_position=Vec3(player.position.x, player.position.y + 1.8, player.position.z),  # ТЕЛО
+        speed=ENEMY_PROJECTILE_SPEED,
+        damage=8,
+        color_type=color.rgba(1, 0.6, 0.2, 1),
+        homing_strength=1.0,
+        explosion_radius=3.5
     )
 
 
@@ -1635,11 +3577,11 @@ def attack_player(enemy):
 
         # Визуальный эффект попадания
         if enemy.type == "normal":
-            create_blood_effect(player.position + Vec3(0, 1, 0))
+            create_blood_effect_optimized(player.position + Vec3(0, 1, 0))  # <-- ИСПОЛЬЗУЕМ _optimized версию
         elif enemy.type == "medium":
-            create_blood_effect(player.position + Vec3(0, 1.5, 0))
+            create_blood_effect_optimized(player.position + Vec3(0, 1.5, 0))  # <-- ИСПОЛЬЗУЕМ _optimized версию
         else:
-            create_blood_effect(player.position + Vec3(0, 2, 0))
+            create_blood_effect_optimized(player.position + Vec3(0, 2, 0))  # <-- ИСПОЛЬЗУЕМ _optimized версию
 
 
 def ranged_attack(enemy):
@@ -1676,22 +3618,22 @@ def create_homing_projectile(position, direction, speed, damage, color_type, hom
     )
     glow.alpha = 0.5
 
-    # Трассер за снарядом
-    tracer = Entity(
-        model='cube',
-        color=lerp(color_type, color.yellow, 0.5),
-        scale=(0.3, 0.3, 1.0),
-        position=position - direction * 0.6,
-        add_to_scene_entities=True
-    )
+    # # Трассер за снарядом
+    # tracer = Entity(
+    #     model='cube',
+    #     color=lerp(color_type, color.yellow, 0.5),
+    #     scale=(0.3, 0.3, 1.0),
+    #     position=position - direction * 0.6,
+    #     add_to_scene_entities=True
+    # )
 
     projectile.direction = direction
-    projectile.speed = speed
+    projectile.speed = speed * 1.5
     projectile.damage = damage
     projectile.creation_time = time.time()
     projectile.lifetime = 4.0  # Оптимальное время жизни
     projectile.glow = glow
-    projectile.tracer = tracer
+    # projectile.tracer = tracer
     projectile.homing_strength = homing_strength * 2.5
     projectile.homing_active = True
     projectile.ground_bounce = True
@@ -1700,6 +3642,7 @@ def create_homing_projectile(position, direction, speed, damage, color_type, hom
 
     enemy_projectiles.append(projectile)
     return projectile
+
 
 # ПОЛНОСТЬЮ ЗАМЕНЯЕМ СПЕЦИАЛЬНУЮ АТАКУ БОССА
 def boss_special_attack(enemy):
@@ -1848,7 +3791,7 @@ def check_wave_collision(center_position, current_scale, wave_thickness, enemy, 
             player_health -= enemy.damage
             print(
                 f"🌊 Кольцевая волна поразила вас! Урон: {enemy.damage}. Здоровье: {player_health}/{player_max_health}")
-            create_blood_effect(player.position + Vec3(0, 0.5, 0))
+            create_blood_effect_optimized(player.position + Vec3(0, 0.5, 0))
 
 
 # ФУНКЦИЯ СОЗДАНИЯ ЭФФЕКТА УДАРА ВОЛНЫ
@@ -1889,6 +3832,8 @@ def create_wave_impact_effect(position):
             update_impact()
 
         animate_impact()
+
+
 # ИСПРАВЛЯЕМ ФУНКЦИЮ boss_charge_attack
 def boss_charge_attack(enemy):
     print("🚀 БОСС готовится к атаке с разбегом!")
@@ -1962,81 +3907,8 @@ def update_enemy_visuals(enemy):
 
 # Функция для обновления эффектов крови
 def update_blood_effects():
-    current_time = time.time()
-
-    for i in range(len(blood_effects) - 1, -1, -1):
-        particles = blood_effects[i]
-
-        for j in range(len(particles) - 1, -1, -1):
-            particle_data = particles[j]
-
-            # Проверяем структуру данных
-            if len(particle_data) == 5:
-                particle, direction, speed, spawn_time, original_size = particle_data
-            else:
-                # Для упрощенных эффектов (лужи, брызги)
-                particle, direction, speed, spawn_time, original_size = particle_data[0], Vec3(0, 0, 0), 0, \
-                particle_data[3], 1.0
-
-            # Проверяем что частица еще существует
-            if not particle or not hasattr(particle, 'enabled') or not particle.enabled:
-                particles.pop(j)
-                continue
-
-            age = current_time - spawn_time
-
-            if age < blood_duration:
-                # Двигаем только летящие частицы (не лужи и брызги)
-                if speed > 0:
-                    particle.position += direction * time.dt * speed
-
-                    # Гравитация - падают вниз
-                    particle.position.y -= time.dt * blood_gravity
-
-                # Плавное исчезновение
-                progress = age / blood_duration
-
-                # ИСПРАВЛЕНИЕ: безопасное изменение альфа-канала
-                try:
-                    # Вместо прямого изменения alpha, создаем новый цвет с прозрачностью
-                    current_color = particle.color
-                    new_alpha = 1 - progress
-
-                    # Для летящих частиц - изменение цвета
-                    if speed > 0:
-                        if progress < 0.3:
-                            new_color = lerp(color.rgba(0.6, 0, 0, 1), color.rgba(0.6, 0, 0, 1), progress * 3)
-                        else:
-                            new_color = lerp(color.rgba(0.6, 0, 0, 1), color.dark_gray, (progress - 0.3) * 1.5)
-
-                        # Сохраняем альфа-канал
-                        particle.color = color.rgba(new_color[0], new_color[1], new_color[2], new_alpha)
-                    else:
-                        # Для луж и брызг просто меняем прозрачность
-                        particle.color = color.rgba(current_color[0], current_color[1], current_color[2], new_alpha)
-
-                except Exception as e:
-                    # Если возникла ошибка, просто уничтожаем частицу
-                    print(f"Ошибка с частицей крови: {e}")
-                    destroy(particle)
-                    particles.pop(j)
-                    continue
-
-                # Для летящих частиц - уменьшение размера
-                if speed > 0:
-                    particle.scale = max(0.01, original_size * (1 - progress * 0.7))
-
-            else:
-                destroy(particle)
-                particles.pop(j)
-
-        # Если все частицы исчезли, удаляем эффект
-        if len(particles) == 0:
-            blood_effects.pop(i)
-
-
-
-
+    """Оптимизированная версия обновления эффектов"""
+    safe_update_effects()  # Обновляет все эффекты (кровь + трассеры + вспышки)
 
 
 # УЛУЧШЕННЫЙ ЭФФЕКТ ДУЛЬНОГО ПЛАМЕНИ
@@ -2191,10 +4063,31 @@ def create_bullet_tracer(muzzle_offset=None):
     tracer = Entity(
         model='cube',
         color=color.yellow,
-        scale=(0.03, 0.03, 0.2),
+        scale=(0.06, 0.06, 0.4),
         position=muzzle_world_pos,
         add_to_scene_entities=True,
-        eternal=False
+        eternal=False, shader=Shader(language=Shader.GLSL, fragment='''
+            #version 140
+            uniform sampler2D p3d_Texture0;
+            uniform vec4 p3d_Color;
+            in vec2 uv;
+            out vec4 frag_color;
+
+            void main() {
+                vec4 tex_color = texture(p3d_Texture0, uv) * p3d_Color;
+                // Делаем трассер ярким и с свечением
+                float glow = 1.5;
+                tex_color.rgb *= glow;
+
+                // Градиент от ярко-желтого к оранжевому
+                float gradient = uv.y;
+                vec3 start_color = vec3(1.0, 1.0, 0.2); // Ярко-желтый
+                vec3 end_color = vec3(1.0, 0.5, 0.0);   // Оранжевый
+                tex_color.rgb = mix(start_color, end_color, gradient) * tex_color.a;
+
+                frag_color = tex_color;
+            }
+        ''')
     )
 
     # Сохраняем начальную позицию и направление
@@ -2206,10 +4099,10 @@ def create_bullet_tracer(muzzle_offset=None):
     return tracer
 
 
-
-
 # Функция для обновления эффектов
 def update_shot_effects():
+    if not muzzle_flash_entities and not bullet_tracers:
+        return
     current_time = time.time()
 
     for flash_idx in range(len(muzzle_flash_entities) - 1, -1, -1):  # меняем i на flash_idx
@@ -2267,11 +4160,9 @@ def update_shot_effects():
 
 def check_sprint_collisions():
     # Проверяем столкновения с основными объектами
-    collision_objects = [house_collider, myBox, myBall, goal, pillar]
+    collision_objects = []
 
     # Добавляем блоки платформы
-    for block in blocks:
-        collision_objects.append(block)
 
     # Добавляем врагов (чтобы не проходить сквозь них)
     for enemy in enemies:
@@ -2293,7 +4184,7 @@ def check_sprint_collisions():
 
 # ОБНОВЛЯЕМ ФУНКЦИЮ perform_shot ДЛЯ DUAL UZI
 def perform_shot():
-    global is_shooting, shoot_animation_time,grenade_effect
+    global is_shooting, shoot_animation_time, grenade_effect
 
     # ПРОВЕРЯЕМ ПАТРОНЫ ПЕРЕД ВЫСТРЕЛОМ
     if not use_ammo():
@@ -2505,7 +4396,7 @@ def create_explosion(position, radius, damage):
             print(f"💥 Враг попал в радиус взрыва! Дистанция: {distance_to_explosion}")
 
             # УБИВАЕМ ВРАГА МГНОВЕННО
-            create_blood_effect(enemy.entity.position + Vec3(0, 1, 0))
+            create_blood_effect_optimized(enemy.entity.position + Vec3(0, 1, 0))
             on_enemy_killed()
 
             # Уничтожаем врага
@@ -2559,6 +4450,7 @@ def update_explosion_shake():
             current_explosion_shake = (0, 0, 0)
             current_explosion_tilt = (0, 0, 0)
 
+
 # ОБНОВЛЯЕМ ФУНКЦИЮ handle_shooting
 def handle_shooting():
     global is_shooting, last_fire_time, is_firing_auto
@@ -2584,6 +4476,7 @@ def handle_shooting():
         if current_time - last_fire_time >= auto_fire_delay:
             perform_shot()
             last_fire_time = current_time
+
 
 # ФУНКЦИЯ СОЗДАНИЯ HUD ДЛЯ ОРУЖИЯ (УВЕЛИЧЕННАЯ ВЕРСИЯ)
 def create_weapon_hud():
@@ -2662,7 +4555,7 @@ def create_weapon_hud():
         model='quad',
         color=color.white,
         scale=(0.2, 0.2),  # УВЕЛИЧИЛИ ИКОНКУ
-        position=(0.8,-0.36),
+        position=(0.8, -0.36),
         z=-0.01,
 
     )
@@ -2795,7 +4688,7 @@ def update_weapon_hud():
         weapon_icons["reload_text"].color = color.yellow
         # Мигающий эффект
         pulse = math.sin(time.time() * 2) * 0.08 + 0.1
-        weapon_icons["reload_text"].scale =3.8 * pulse
+        weapon_icons["reload_text"].scale = 3.8 * pulse
     else:
         weapon_icons["reload_text"].text = ""
 
@@ -2839,8 +4732,8 @@ def use_ammo():
 # ИСПРАВЛЯЕМ ФУНКЦИЮ reload_weapon
 # ИСПРАВЛЯЕМ СИСТЕМУ ПЕРЕЗАРЯДКИ
 def reload_weapon():
-    global is_reloading_anim, reload_anim_time, current_weapon,reload_strength
-    reload_strength=1
+    global is_reloading_anim, reload_anim_time, current_weapon, reload_strength
+    reload_strength = 1
 
     if is_reloading_anim:
         return
@@ -2913,6 +4806,8 @@ def update_reload_animation():
 
             # ТЕПЕРЬ ДОБАВЛЯЕМ ПАТРОНЫ ПОСЛЕ ЗАВЕРШЕНИЯ АНИМАЦИИ
             finish_reload()
+
+
 # ФУНКЦИЯ ЗАВЕРШЕНИЯ ПЕРЕЗАРЯДКИ
 def finish_reload():
     global current_weapon
@@ -2939,6 +4834,7 @@ def finish_reload():
         print(f"🔫 Добавлено патронов: {ammo_to_add}")
     else:
         print("❌ Не удалось добавить патроны - проверь настройки")
+
 
 # ФУНКЦИЯ СОЗДАНИЯ HUD ДЛЯ ЗДОРОВЬЯ С ТЕКСТУРАМИ
 # ФУНКЦИЯ СОЗДАНИЯ HUD ДЛЯ ЗДОРОВЬЯ С ТЕКСТУРАМИ
@@ -3279,10 +5175,6 @@ def create_heal_pickup(position):
     return heal_pickup
 
 
-
-
-
-
 # ФУНКЦИЯ ПРОВЕРКИ СТОЛКНОВЕНИЙ С АПТЕЧКАМИ
 def check_heal_pickup_collisions():
     global heal_pickup_cooldown, player_health
@@ -3342,10 +5234,6 @@ def pickup_heal(pickup):
     print(f"💊 Подобрана аптечка! +{heal_amount} HP. Теперь {player_health}/{player_max_health} HP")
 
     # Переспавним аптечку через некоторое время
-
-
-
-
 
 
 # ФУНКЦИЯ СОЗДАНИЯ ЭФФЕКТА ПОДБОРА
@@ -3428,7 +5316,6 @@ def create_ammo_pickup(position):
 
 
 # ФУНКЦИЯ СОЗДАНИЯ НЕСКОЛЬКИХ ПАЧЕК ПАТРОНОВ НА КАРТЕ
-
 
 
 # ФУНКЦИЯ ПРОВЕРКИ СТОЛКНОВЕНИЙ С ПАТРОНАМИ
@@ -3525,19 +5412,33 @@ def pickup_ammo(pickup):
 
 # ФУНКЦИЯ РЕСПАВНА ПАЧКИ ПАТРОНОВ
 def respawn_ammo_pickup():
-    # Создаем новую пачку патронов в случайном месте
-    x = random.uniform(-25, 25)
-    z = random.uniform(-25, 25)
-    position = (x, 0.5, z)
+    # Определяем границы обеих зон вместе
+    x_min, x_max = -56, 63  # общие границы по X для обеих зон
+    z_min, z_max = -203, -46  # общие границы по Z для обеих зон
 
-    # Проверяем, чтобы не зареспавнить слишком близко к игроку
-    if (Vec3(position) - player.position).length() < 5:
-        # Если близко, пробуем еще раз через 10 секунд
-        invoke(respawn_ammo_pickup, delay=10.0)
-        return
+    attempts = 0
+    max_attempts = 20  # Увеличиваем количество попыток
 
-    create_ammo_pickup(position)
-    print("🔫 Новая пачка патронов зареспавнилась!")
+    while attempts < max_attempts:
+        # Генерируем случайную позицию в общих границах
+        x = random.uniform(x_min, x_max)
+        z = random.uniform(z_min, z_max)
+        position = (x, 0.5, z)
+
+        # Проверяем, что позиция находится в одной из зон
+        if is_position_in_spawn_area(Vec3(position)):
+            # Проверяем расстояние до игрока
+            if (Vec3(position) - player.position).length() >= 5:
+                # Нашли подходящую позицию
+                create_ammo_pickup(position)
+                print(f"🔫 Новая пачка патронов зареспавнилась! Позиция: {position}")
+                return
+
+        attempts += 1
+
+    # Если не нашли подходящую позицию
+    invoke(respawn_ammo_pickup, delay=10.0)
+    print("⚠️ Не удалось найти подходящее место для спавна патронов, пробуем снова через 10 сек")
 
 
 # ФУНКЦИЯ СОЗДАНИЯ ЭФФЕКТА ПОДБОРА ПАТРОНОВ
@@ -3653,7 +5554,7 @@ def spawn_assault_rifle_pickup():
         parent=camera.ui,
         text="ЗАДАНИЕ: Найдите автомат!!!",
         position=(-0.8, -0.4, 0),
-        scale=2,
+        scale=2.5,
         color=color.yellow,
         background=True,
         background_color=color.rgba(0, 0, 0, 0.7),
@@ -3661,7 +5562,7 @@ def spawn_assault_rifle_pickup():
     )
 
     # Спавним автомат в случайном месте (но не слишком близко к игроку)
-    spawn_position = find_valid_spawn_position()
+    spawn_position = (26, 20, 2)
 
     # Создаем модель автомата
     assault_rifle_pickup = Entity(
@@ -3722,20 +5623,56 @@ def spawn_assault_rifle_pickup():
 
 
 def find_valid_spawn_position():
-    """Находит валидную позицию для спавна (не слишком близко к игроку)"""
-    attempts = 0
-    while attempts < 20:  # Максимум 20 попыток
-        x = random.uniform(-25, 25)
-        z = random.uniform(-25, 25)
-        position = Vec3(x, 1, z)
+    """Находит валидную позицию для спавна в одной из двух областей"""
+    # Случайно выбираем зону спавна: 0 - основная зона, 1 - вторая зона
+    zone_choice = random.randint(0, 1)
 
-        # Проверяем дистанцию до игрока
-        if (position - player.position).length() > 15:  # Не ближе 15 единиц
-            return position
-        attempts += 1
+    if zone_choice == 0:
+        # ПЕРВАЯ ЗОНА: основная (как было)
+        center_x = 53
+        center_y = 1.5
+        center_z = -81
 
-    # Если не нашли подходящую позицию, спавним в углу карты
-    return Vec3(-20, 1, -20)
+        # Размеры области
+        width = 20  # ширина по оси X (от 43 до 63)
+        length = 70  # длина по оси Z (от -116 до -46)
+
+        zone_name = "ОСНОВНАЯ ЗОНА"
+    else:
+        # ВТОРАЯ ЗОНА: радиус 25 от точки (-31, 1, -178)
+        center_x = -31
+        center_y = 1.5
+        center_z = -178
+
+        # Размеры области (радиус 25, значит квадрат 50x50)
+        width = 50  # от -56 до -6 по X
+        length = 50  # от -203 до -153 по Z
+
+        zone_name = "ВТОРАЯ ЗОНА (радиус 25)"
+
+    # ЖЕСТКОЕ ограничение только выбранной областью
+    for attempt in range(30):
+        # Генерируем строго в выбранной области
+        x = random.uniform(center_x - width / 2, center_x + width / 2)
+        z = random.uniform(center_z - length / 2, center_z + length / 2)
+        position = Vec3(x, center_y, z)
+
+        # Проверяем что точно в пределах выбранной зоны
+        if zone_choice == 0:
+            in_zone = (43 <= x <= 63 and -116 <= z <= -46)
+        else:
+            in_zone = (-56 <= x <= -6 and -203 <= z <= -153)
+
+        if in_zone:
+            # Проверяем дистанцию до игрока
+            distance_to_player = (position - player.position).length()
+            if distance_to_player > 10:  # Не ближе 10 единиц
+                print(f"✅ {zone_name}: X={x:.1f}, Z={z:.1f}")
+                return position
+
+    # Если не нашли - возвращаем центр выбранной зоны
+    print(f"❌ Не нашли позицию в {zone_name}, возвращаем центр зоны")
+    return Vec3(center_x, center_y, center_z)
 
 
 def check_weapon_pickup_collisions():
@@ -3745,9 +5682,11 @@ def check_weapon_pickup_collisions():
             continue
 
         pickup = pickup_data['entity']
-        distance = (player.position - pickup.position).length()
 
-        if distance < 3.0:  # Дистанция подбора
+        # ИСПРАВЛЯЕМ: вызываем функцию distance()
+        dist = distance(player.position, pickup.position)
+
+        if dist < 3.0:  # Дистанция подбора
             pickup_weapon(pickup_data)
 
 
@@ -3872,6 +5811,7 @@ def create_weapon_pickup_effect(position, weapon_type):
 def hard_cleanup_all():
     """Полная очистка ВСЕХ систем (кроме снарядов врагов в полете)"""
     cleaned = 0
+    object_manager.cleanup_dead_objects()
 
     # 1. ОЧИСТКА ВРАГОВ - УДАЛЯЕМ ВСЕХ МЕРТВЫХ
     global enemies
@@ -3957,6 +5897,8 @@ def show_shader_activated_message():
         invoke(lambda: destroy(message), delay=1.0)
 
     invoke(fade_out, delay=2.0)
+
+
 def debug_memory():
     """Диагностика памяти"""
     print("=== ДИАГНОСТИКА ПАМЯТИ ===")
@@ -4092,17 +6034,12 @@ def protect_critical_objects():
         stage_text, enemies_text, press_e_text,
         dialogue_bg, npc_name, npc_line, button1, button2,
         human, head, body, human_collider,
-        house_left, walls, door, window_left, window_right,
-        roof_left, roof_right, chimney, house_collider,
-        myBox, myBall, goal, pillar, sky
+        sky
     ]
 
     # Добавляем все оружия из словаря
     if weapons:
         critical_objects.extend(weapons.values())
-
-    # Добавляем все блоки платформы
-    critical_objects.extend(blocks)
 
     # Добавляем всех активных врагов
     for enemy in enemies:
@@ -4164,80 +6101,428 @@ def update_shader_intensity():
         print(f"🎚️ Интенсивность шейдера: {shader_intensity * 100:.0f}% (Stage {current_stage})")
 
 
+def animate_explosion_particle(particle, direction, speed, lifetime):
+    """Анимация частицы взрыва"""
+    start_time = time.time()
+    start_scale = particle.scale
+
+    def update_particle():
+        current_time = time.time()
+        age = current_time - start_time
+
+        if age < lifetime and particle and particle.enabled:
+            # Движение
+            particle.position += direction * speed * time.dt
+
+            # Гравитация
+            particle.position.y -= time.dt * 3
+
+            # Исчезновение
+            progress = age / lifetime
+            particle.alpha = 1.0 - progress
+            particle.scale = start_scale * (1 - progress * 0.7)
+
+            invoke(update_particle, delay=1 / 60)
+        elif particle:
+            destroy(particle)
+
+    update_particle()
+
+
+def destroy_projectile(projectile):
+    """Безопасное уничтожение снаряда и всех связанных объектов"""
+    if not projectile:
+        return
+
+    # Уничтожаем связанные объекты
+    related_objects = []
+
+    if hasattr(projectile, 'glow'):
+        related_objects.append(projectile.glow)
+    if hasattr(projectile, 'particles'):
+        related_objects.extend(projectile.particles)
+
+    # Уничтожаем основной снаряд
+    try:
+        destroy(projectile)
+    except:
+        pass
+
+    # Уничтожаем связанные объекты
+    for obj in related_objects:
+        if obj and hasattr(obj, 'enabled') and obj.enabled:
+            try:
+                destroy(obj)
+            except:
+                pass
+
+
+def apply_stun_effect(duration=0.5):
+    """Применяет эффект оглушения к игроку"""
+    global is_stunned, stun_effect_time, stun_effect_duration
+
+    is_stunned = True
+    stun_effect_duration = duration
+    stun_effect_time = 0
+
+    # Визуальный эффект оглушения
+    stun_overlay = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.rgba(1, 1, 1, 0.3),
+        scale=(2, 2),
+        position=(0, 0, -0.1),
+        eternal=False
+    )
+
+    # Анимация исчезновения
+    stun_overlay.animate_color(color.rgba(1, 1, 1, 0), duration=duration)
+    invoke(lambda: destroy(stun_overlay) if stun_overlay else None, delay=duration)
+
+    print(f"😵 Игрок оглушен на {duration} секунд!")
+
+
+def convert_all_old_projectiles():
+    """Конвертирует все старые снаряды в новый формат"""
+    for projectile in enemy_projectiles:
+        ensure_projectile_attributes(projectile)
+def update_all_animations():
+    """Обновляет все активные анимации в игре"""
+    # Если есть глобальная система анимаций - обновляем ее
+    if 'animation_system' in globals() and animation_system:
+        animation_system.update()
+
+
+def create_trigger_area():
+    """Создает визуальную зону триггера без коллайдера"""
+    global trigger_area
+
+    # Создаем визуальную зону (без коллайдера, можно войти)
+    trigger_area = Entity(
+        model='cube',
+        color=color.rgba(1, 0, 0, 0.15),  # Очень прозрачный красный куб
+        scale=(10, 10, 10),  # Размер 10x10x10
+        position=trigger_center,  # Центральные координаты
+        eternal=True,
+        collider=None  # НЕТ КОЛЛАЙДЕРА!
+    )
+    print(f"🎯 Большая триггерная зона создана (можно войти):")
+    print(f"📍 Центр: {trigger_center}")
+    print(f"📏 Размер: 10x10x10 единиц")
+    print(f"📊 Область: X={trigger_center.x - 5:.2f} до {trigger_center.x + 5:.2f}")
+    print(f"          Y={trigger_center.y - 5:.2f} до {trigger_center.y + 5:.2f}")
+    print(f"          Z={trigger_center.z - 5:.2f} до {trigger_center.z + 5:.2f}")
+    print("⚠️ Зона без коллайдера - можно свободно входить")
+
+
+def check_trigger():
+    """Проверяет приближение к триггерной зоне (простая проверка расстояния)"""
+    global trigger_cooldown, trigger_activated
+
+    if not trigger_area or not game_started or trigger_activated:
+        return
+
+    # Обновляем кулдаун
+    if trigger_cooldown > 0:
+        trigger_cooldown -= time.dt
+        return
+
+    # Проверяем находится ли игрок в кубе 10x10x10
+    in_zone = (
+            abs(player.position.x - trigger_center.x) <= 5 and
+            abs(player.position.y - trigger_center.y) <= 5 and
+            abs(player.position.z - trigger_center.z) <= 5
+    )
+
+    if in_zone:
+        # Расстояние до центра для отладки
+        distance = (player.position - trigger_center).length()
+
+        # Проверяем, не был ли триггер уже активирован в этом заходе
+        if not getattr(trigger_area, 'player_in_zone', False):
+            print(f"🎯 Игрок вошел в триггерную зону! Расстояние до центра: {distance:.2f}")
+            print(f"📍 Позиция игрока: X={player.position.x:.2f}, Y={player.position.y:.2f}, Z={player.position.z:.2f}")
+
+            if current_stage < 25:
+                # Волна < 25 - показываем подсказку
+                show_trigger_hint()
+                trigger_cooldown = 6.0  # Кулдаун 6 секунд
+            else:
+                # Волна >= 25 - показываем поздравление и выход
+                trigger_activated = True
+                show_congratulation()
+                trigger_cooldown = 10.0  # Долгий кулдаун
+
+            # Отмечаем что игрок активировал триггер
+            trigger_area.player_in_zone = True
+
+            # Меняем цвет зоны при активации
+            trigger_area.animate_color(color.rgba(1, 0.5, 0, 0.3), duration=1.0)
+
+    else:
+        # Игрок вышел из зоны - сбрасываем флаг
+        if getattr(trigger_area, 'player_in_zone', False):
+            trigger_area.player_in_zone = False
+            trigger_area.animate_color(color.rgba(1, 0, 0, 0.15), duration=1.0)
+
+
+def show_trigger_hint():
+    """Показывает подсказку 'Вы еще не готовы'"""
+    global trigger_hint_text
+
+    # Скрываем предыдущую подсказку если есть
+    if trigger_hint_text:
+        try:
+            destroy(trigger_hint_text)
+        except:
+            pass
+
+    # Создаем текст подсказки сверху экрана
+    trigger_hint_text = Text(
+        parent=camera.ui,
+        text="ВЫ ЕЩЕ НЕ ГОТОВЫ",
+        position=(0, 0.35, 0),
+        scale=2.8,
+        color=color.rgba(1, 0.2, 0.2, 1),
+        background=True,
+        background_color=color.rgba(0, 0, 0, 0.8),
+        font='custom2.ttf',
+        eternal=False
+    )
+
+    # Простая анимация появления
+    trigger_hint_text.animate_scale(3.0, duration=0.3, curve=curve.out_quad)
+
+    # Удаляем через 4 секунды
+    invoke(lambda: hide_trigger_hint(), delay=4.0)
+
+
+def hide_trigger_hint():
+    """Правильно скрывает подсказку триггера"""
+    global trigger_hint_text
+
+    if trigger_hint_text:
+        try:
+            # Просто уничтожаем объект без анимации
+            destroy(trigger_hint_text)
+        except:
+            pass
+        trigger_hint_text = None
+
+
+def show_congratulation():
+    """Показывает поздравление и затемнение экрана"""
+    global trigger_congratulation_text, trigger_fade_overlay
+
+    # Отключаем управление игроком
+    player.enabled = False
+
+    # 1. Полное затемнение экрана
+    trigger_fade_overlay = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.black,
+        scale=(2, 2),
+        z=-10,
+        eternal=False
+    )
+
+    # Плавное затемнение (3 секунды)
+    trigger_fade_overlay.color = color.rgba(0, 0, 0, 0)
+    trigger_fade_overlay.animate_color(color.rgba(0, 0, 0, 1), duration=3.0)
+
+    # 2. Текст "Congratulation" по центру
+    trigger_congratulation_text = Text(
+        parent=camera.ui,
+        text="CONGRATULATION",
+        position=(0, 0, 0),
+        scale=0.1,  # Начинаем с маленького
+        color=color.rgba(1, 0.84, 0, 0),  # Золотой, полностью прозрачный
+        font='custom2.ttf',
+        eternal=False
+    )
+
+    # Анимация появления текста
+    invoke(lambda: trigger_congratulation_text.animate_color(color.rgba(1, 0.84, 0, 1), duration=2.0), delay=1.0)
+    invoke(lambda: trigger_congratulation_text.animate_scale(4.5, duration=2.5, curve=curve.out_quad), delay=1.0)
+
+    # Эффект мерцания
+    def flash_effect():
+        if trigger_congratulation_text:
+            trigger_congratulation_text.animate_color(color.rgba(1, 1, 1, 1), duration=0.3)
+            invoke(lambda: trigger_congratulation_text.animate_color(color.rgba(1, 0.84, 0, 1), duration=0.3)
+            if trigger_congratulation_text else None, delay=0.3)
+
+    # Запускаем мерцание каждую секунду
+    invoke(flash_effect, delay=2.5)
+    invoke(flash_effect, delay=3.5)
+    invoke(flash_effect, delay=4.5)
+
+    # 3. Сообщение об окончании
+    end_text = Text(
+        parent=camera.ui,
+        text="Вы достигли 25+ волны!",
+        position=(0, -0.2, 0),
+        scale=1.8,
+        color=color.rgba(1, 1, 1, 0),
+        font='custom2.ttf',
+        eternal=False
+    )
+
+    invoke(lambda: end_text.animate_color(color.rgba(1, 1, 1, 1), duration=1.5), delay=2.0)
+
+    print("🎉 ПОЗДРАВЛЯЕМ! Вы достигли 25+ волны!")
+
+    # 4. Выход через 7 секунд
+    invoke(quit_game, delay=7.0)
+
+
+def quit_game():
+    """Выход из игры с анимацией"""
+    print("🚪 Выход из игры...")
+
+    # Анимация исчезновения текста
+    if trigger_congratulation_text:
+        trigger_congratulation_text.animate_color(color.rgba(1, 0.84, 0, 0), duration=1.0)
+
+    # Выход через 1 секунду
+    invoke(lambda: application.quit(), delay=1.0)
+
+
 
 def update():
-    global player_health, is_sprinting
+    global coordinates_debug_timer, player_health, is_sprinting
     global in_dialogue, is_moving, shake_timer, is_shooting, shoot_animation_time
     global is_firing_auto, last_fire_time, last_shoot_sound_time
     global target_weapon_rotation, current_weapon_rotation, target_weapon_position, current_weapon_position, mouse_movement
     global stun_effect_time, is_stunned, shoot_strength, reload_strength, walk_strength, shader_enabled, grenade_effect
-    global lvl
-    update_stage_animation()
-    if not enemies_spawned_for_current_stage:
-        update_stage()
+    global lvl, shader_intensity
+    if game_started and trigger_area:
+        check_trigger()
+    if random.random() < 0.5:  # 50% шанс обновления каждый кадр
+        update_blood_effects_optimized()
+
+    if not hasattr(update, 'last_blood_cleanup'):
+        update.last_blood_cleanup = time.time()
+
+    if time.time() - update.last_blood_cleanup > 5.0:  # Каждые 5 секунд
+        cleanup_excess_blood_effects()
+        update.last_blood_cleanup = time.time()
+    update_all_animations()
+    # =========== ЕСЛИ ИГРА НЕ НАЧАЛАСЬ ===========
+    # =========== ЕСЛИ ИГРА НЕ НАЧАЛАСЬ ===========
+    if not game_started:
+
+        # МИНИМАЛЬНЫЕ ОБНОВЛЕНИЯ ДЛЯ ЛОББИ
+        camera.set_shader_input("time", time.time())
+        camera.set_shader_input("base_intensity", 0.0)
+        camera.set_shader_input("shoot_strength", 0.0)
+        camera.set_shader_input("reload_strength", 0.0)
+        camera.set_shader_input("walk_strength", 0.0)
+        camera.set_shader_input("grenade_effect", 0.0)
+        if is_selecting_weapon and camera_mode == "table_view":
+            highlight_hovered_weapon()
 
 
-        # Проверка завершения стадии (каждый кадр)
-    check_stage_completion()
+        # Простая проверка - игрок не должен упасть с платформы
+        if player.position.y < 70:
+            player.position = Vec3(0, 86, 0)
+            if hasattr(player, 'velocity_y'):
+                player.velocity_y = 0
+
+        # ТОЛЬКО если идет выбор оружия - проверяем клики
+        if is_selecting_weapon:
+            # ОПТИМИЗИРОВАННАЯ проверка кликов - раз в 3 кадра
+            if not hasattr(update, 'select_frame_counter'):
+                update.select_frame_counter = 0
+
+            update.select_frame_counter += 1
+            if update.select_frame_counter % 3 == 0:  # Раз в 3 кадра
+                if mouse.left:
+                    check_mouse_click()
 
 
-        # АГРЕССИВНАЯ ОЧИСТКА КАЖДЫЕ 30 СЕКУНД
-    if not hasattr(update, 'last_full_cleanup'):
-        update.last_full_cleanup = time.time()
+        # ВЫХОДИМ ИЗ UPDATE РАНО - не выполняем ВСЮ логику игры
+        return
 
-        # ПОЛНАЯ ОЧИСТКА КАЖДЫЕ 60 СЕКУНД
-    if time.time() - update.last_full_cleanup > 60.0:
-        hard_cleanup_all()
-        update.last_full_cleanup = time.time()
+    # Конвертация снарядов
+    if not hasattr(update, 'projectiles_converted'):
+        convert_old_projectiles()
+        update.projectiles_converted = True
 
+    # Проверка падения
+    if player.position.y < -5:
+        print("⚠️ Игрок упал, телепортируем обратно!")
+        player.position = Vec3(player.position.x, 5, player.position.z)
+        if hasattr(player, 'velocity_y'):
+            player.velocity_y = 0
 
-
+    # Управление шейдером
     camera.set_shader_input("time", time.time())
 
-    # Управляем видимостью эффектов через base_intensity
     if shader_enabled:
         grenade_effect = max(0, grenade_effect - time.dt * 2)
         shoot_strength = max(0, shoot_strength - time.dt * 4)
         reload_strength = max(0, reload_strength - time.dt * 1.2)
 
         camera.set_shader_input("grenade_effect", grenade_effect)
-        camera.set_shader_input("base_intensity", shader_intensity)  # Используем вычисленную интенсивность
+        camera.set_shader_input("base_intensity", shader_intensity)
         camera.set_shader_input("shoot_strength", shoot_strength)
         camera.set_shader_input("reload_strength", reload_strength)
         camera.set_shader_input("walk_strength", walk_strength)
     else:
-        # Когда шейдер выключен - обнуляем ВСЕ эффекты
-        camera.set_shader_input("base_intensity", 0.0)  # Эффекты ВЫКЛЮЧЕНЫ
+        camera.set_shader_input("base_intensity", 0.0)
         camera.set_shader_input("shoot_strength", 0.0)
         camera.set_shader_input("reload_strength", 0.0)
         camera.set_shader_input("walk_strength", 0.0)
         camera.set_shader_input("grenade_effect", 0.0)
 
+    # Обновление анимаций стадий
+    update_stage_animation()
+
+    # Запуск стадий
+    if not enemies_spawned_for_current_stage and not stage_animation["is_playing"]:
+        update_stage()
+
+    # Проверка завершения стадии
+    check_stage_completion()
+
+    # Полная очистка каждые 60 секунд
+    if not hasattr(update, 'last_full_cleanup'):
+        update.last_full_cleanup = time.time()
+
+    if time.time() - update.last_full_cleanup > 60.0:
+        hard_cleanup_all()
+        update.last_full_cleanup = time.time()
+
+    # Обновление HUD
     update_health_hud()
     update_explosion_shake()
     update_reload_animation()
 
-    # ОБРАБОТКА СТРЕЛЬБЫ С УЧЕТОМ ТИПА ОРУЖИЯ
+    # Обновление игрока и врагов
+    safe_update_enemies_optimized()
+    show_coordinates_console()
+
+    # Обновление оружия
     handle_shooting()
+
+    # Проверка подбора предметов
     check_heal_pickup_collisions()
     update_weapon_hud()
     check_ammo_pickup_collisions()
-
-    # ПРОВЕРКА ПОДБОРА ОРУЖИЯ
     check_weapon_pickup_collisions()
 
-    if not stage_enemies_spawned:
-        update_stage()
+    # Обновление анимации перезарядки
     if not is_reloading_anim:
         handle_shooting()
 
-    # Отслеживаем движение игрока для предсказания
+    # Отслеживание истории позиций для предсказания
     if not hasattr(player, 'last_position'):
         player.last_position = player.position
     if not hasattr(player, 'positions_history'):
         player.positions_history = []
 
-    # Сохраняем историю позиций для лучшего предсказания
     player.positions_history.append(Vec3(player.position))
     if len(player.positions_history) > 10:
         player.positions_history.pop(0)
@@ -4245,64 +6530,58 @@ def update():
     if is_sprinting:
         check_sprint_collisions()
 
-    # Обновляем эффекты выстрелов
+    # Обновление эффектов
     update_shot_effects()
 
+    # Изменение FOV для спринта
     if is_sprinting:
         camera.fov = 85
     else:
         camera.fov = 80
 
-    # Обновляем врагов и снаряды
+    # Обновление врагов и снарядов
     update_enemies()
     update_enemy_projectiles()
     check_bullet_hits()
-    update_blood_effects()
+    safe_update_effects()
     update_explosive_projectiles()
 
     # Проверка смерти игрока
     if player_health <= 0:
         player_health = 0
-        print("💀 ВЫ УМЕРЛИ! Игра окончена.")
 
     player.last_position = player.position
 
-    # ОБНОВЛЕНИЕ ЭФФЕКТА ОГЛУШЕНИЯ
+    # Обновление эффекта оглушения
     if is_stunned:
         stun_effect_time += time.dt
         if stun_effect_time >= stun_effect_duration:
             is_stunned = False
             stun_effect_time = 0
 
-    # ⚠️ ИСПРАВЛЕНИЕ: Получаем базовые позиции ИЗ weapon_data для текущего оружия
+    # Получаем базовые позиции оружия
     data = weapon_data[current_weapon]
     weapon_base_position = data["position"]
     weapon_base_rotation = data["rotation"]
 
-    # ОТСТАВАНИЕ ОРУЖИЯ (РАБОТАЕТ ДЛЯ ЛЮБОГО ОРУЖИЯ)
+    # Отставание оружия
     if not is_shooting and mouse.locked:
-        # Получаем движение мыши
         current_mouse_movement = (mouse.velocity[0], mouse.velocity[1])
 
-        # Если мышь двигалась, обновляем целевое положение
         if abs(current_mouse_movement[0]) > 0.001 or abs(current_mouse_movement[1]) > 0.001:
             mouse_movement = current_mouse_movement
 
-            # Целевой поворот оружия с учетом отставания
             target_weapon_rotation = (
                 weapon_base_rotation[0] - mouse_movement[1] * weapon_lag_intensity * 50,
                 weapon_base_rotation[1] - mouse_movement[0] * weapon_lag_intensity * 50,
                 weapon_base_rotation[2] - mouse_movement[0] * weapon_lag_intensity * 20
             )
 
-            # Отставание по позиции
             target_weapon_position = (
                 weapon_base_position[0] - mouse_movement[0] * weapon_lag_position_intensity * 10,
                 weapon_base_position[1] - mouse_movement[1] * weapon_lag_position_intensity * 5,
                 weapon_base_position[2]
             )
-
-        # Постепенно возвращаем к исходному положению
         else:
             target_weapon_rotation = (
                 lerp(target_weapon_rotation[0], weapon_base_rotation[0], time.dt * 2),
@@ -4316,7 +6595,6 @@ def update():
                 lerp(target_weapon_position[2], weapon_base_position[2], time.dt * 3)
             )
 
-        # Плавное движение к целевому положению
         current_weapon_rotation = (
             lerp(current_weapon_rotation[0], target_weapon_rotation[0], time.dt * weapon_lag_speed),
             lerp(current_weapon_rotation[1], target_weapon_rotation[1], time.dt * weapon_lag_speed),
@@ -4329,18 +6607,16 @@ def update():
             lerp(current_weapon_position[2], target_weapon_position[2], time.dt * weapon_lag_speed)
         )
 
-    # АНИМАЦИЯ ВЫСТРЕЛА (ОБЩАЯ ДЛЯ ВСЕХ ОРУЖИЙ)
+    # Анимация выстрела
     if is_shooting:
         shoot_animation_time += time.dt
 
         if shoot_animation_time < shoot_animation_duration:
-            # 1. РЕЗКИЙ ТОЛЧОК НАЗАД
             if shoot_animation_time < shoot_camera_kick_duration:
                 kick_progress = shoot_animation_time / shoot_camera_kick_duration
                 kick_power = shoot_camera_kick_intensity * (1 - kick_progress)
                 camera.position = (0, 0, -kick_power)
 
-            # 2. ВИБРАЦИЯ КАМЕРЫ
             shake_progress = min(1.0, shoot_animation_time / shoot_camera_shake_duration)
             if shake_progress < 1.0:
                 current_shake = shoot_camera_shake_intensity * (1 - shake_progress)
@@ -4363,7 +6639,6 @@ def update():
                         -kick_return
                     )
 
-            # 3. НАКЛОН КАМЕРЫ ВБОК
             if shoot_animation_time < shoot_camera_roll_duration:
                 roll_progress = shoot_animation_time / shoot_camera_roll_duration
                 roll_angle = shoot_camera_roll_intensity * (1 - roll_progress)
@@ -4373,20 +6648,16 @@ def update():
                         shoot_animation_duration - shoot_camera_roll_duration)
                 camera.rotation_z = shoot_camera_roll_intensity * (1 - roll_return_progress)
 
-            # 4. ПОДПРЫГИВАНИЕ ОРУЖИЯ (переопределяем отставание во время стрельбы)
             weapon_bounce = math.sin(shoot_animation_time * 30) * 0.1 * (1 - shake_progress)
 
-            # ⚠️ ИСПРАВЛЕНИЕ: Используем weapon_base_position из weapon_data
             weapon.position = (
                 weapon_base_position[0],
                 weapon_base_position[1] + weapon_bounce,
                 weapon_base_position[2] - weapon_shoot_recoil * (1 - shake_progress)
             )
 
-            # Во время стрельбы сбрасываем отставание
             current_weapon_rotation = weapon_base_rotation
             current_weapon_position = weapon_base_position
-
         else:
             is_shooting = False
             shoot_animation_time = 0
@@ -4395,15 +6666,10 @@ def update():
                 camera.position = camera_base_position
                 camera.rotation = (0, 0, 0)
 
-    # ⚠️ ИСПРАВЛЕНИЕ: Получаем fire_rate из weapon_data для текущего оружия
-    data = weapon_data[current_weapon]
-    fire_rate = data["fire_rate"]
-
-    # ПРАВИЛЬНАЯ логика автоматической стрельбы
+    # Автоматическая стрельба
     if is_firing_auto and data["auto_fire"]:
         current_time = time.time()
-        if current_time - last_fire_time >= fire_rate:
-            # Проверяем патроны перед выстрелом
+        if current_time - last_fire_time >= data["fire_rate"]:
             ammo_type = weapon_data[current_weapon]["ammo_type"]
             ammo_info = ammo_data[ammo_type]
             if ammo_info['current_ammo'] > 0:
@@ -4413,6 +6679,7 @@ def update():
             else:
                 is_firing_auto = False
 
+    # Движение и тряска
     if not is_reloading_anim:
         walking = held_keys['a'] or held_keys['d'] or held_keys['w'] or held_keys['s']
         running = held_keys['shift']
@@ -4424,7 +6691,6 @@ def update():
             shake_timer += time.dt * 8
             speed_multiplier = 1.3 if running else 1.0
 
-            # ТРЯСКА КАМЕРЫ ПРИ ДВИЖЕНИИ
             body_sway_freq = 1.2
             step_freq = 3.5
 
@@ -4434,7 +6700,6 @@ def update():
             camera_step_impact = abs(
                 math.sin(shake_timer * step_freq)) * camera_step_impact_intensity * speed_multiplier
 
-            # ТРЯСКА ОРУЖИЯ ПРИ ДВИЖЕНИИ
             weapon_shake_x = math.sin(
                 shake_timer * body_sway_freq * 1.1) * weapon_body_sway_intensity * speed_multiplier
             weapon_shake_y = math.cos(
@@ -4442,7 +6707,6 @@ def update():
             weapon_step_impact = abs(
                 math.sin(shake_timer * step_freq * 0.9)) * weapon_step_impact_intensity * speed_multiplier
 
-            # ОБЪЕДИНЕННАЯ ТРЯСКА КАМЕРЫ (ходьба + взрыв)
             if not is_shooting:
                 camera.position = (
                     camera_base_position[0] + camera_body_sway_x + current_explosion_shake[0],
@@ -4456,9 +6720,7 @@ def update():
                     current_explosion_tilt[2]
                 )
 
-            # ОБЪЕДИНЕННАЯ ТРЯСКА ОРУЖИЯ (ходьба + взрыв)
             if not is_shooting:
-                # ⚠️ ИСПРАВЛЕНИЕ: Используем current_weapon_position (который уже правильный)
                 weapon.position = (
                     current_weapon_position[0] + weapon_shake_x + current_explosion_shake[0] * 0.3,
                     current_weapon_position[1] + weapon_shake_y + (weapon_step_impact * 0.3) + current_explosion_shake[
@@ -4473,11 +6735,9 @@ def update():
                     current_explosion_tilt[1] * 0.5,
                     current_weapon_rotation[2] + current_explosion_tilt[2] * 0.5
                 )
-
         else:
             if is_moving:
                 is_moving = False
-                # ПРИ ОСТАНОВКЕ - ТОЛЬКО ВЗРЫВНАЯ ТРЯСКА
                 if not is_shooting and not is_firing_auto:
                     camera.position = (
                         camera_base_position[0] + current_explosion_shake[0],
@@ -4491,6 +6751,7 @@ def update():
                         current_explosion_tilt[2]
                     )
 
+    # Звук шагов
     walking = held_keys['a'] or held_keys['d'] or held_keys['w'] or held_keys['s']
     if walking and player.grounded and not in_dialogue:
         if shader_enabled:
@@ -4501,7 +6762,7 @@ def update():
         if walk.playing:
             walk.stop()
 
-    # ДИАЛОГИ И NPC
+    # Диалоги
     if in_dialogue:
         press_e_text.enabled = False
         return
@@ -4511,25 +6772,46 @@ def update():
     else:
         press_e_text.enabled = False
 
-    # ЛОГИКА УРОВНЯ И БЛОКОВ
-    global lvl
-    for i, block in enumerate(blocks):
-        block.x -= directions[i] * time.dt
-        if abs(block.x) > 5:
-            directions[i] *= -1
-        if block.intersects().hit:
-            player.x -= directions[i] * time.dt
-        if player.z > 56 and lvl == 1:
-            lvl = 2
-            sky.texture = 'sky_sunset'
-
-
-
 
 # ОБНОВЛЯЕМ ФУНКЦИЮ INPUT ДЛЯ ПРИОРИТЕТА ПЕРЕКЛЮЧЕНИЯ
 def input(key):
-    global in_dialogue, is_shooting, is_firing_auto, last_fire_time, is_sprinting, shoot_animation_time,shoot_strength,reload_strength,shader_enabled
+    global in_dialogue, is_shooting, is_firing_auto, last_fire_time, is_sprinting, shoot_animation_time, shoot_strength, reload_strength, shader_enabled, is_selecting_weapon, weapon_selection_text
 
+    if not game_started:
+        # Обрабатываем только E для выбора оружия и ESC для выхода
+        if key == 'e' and not is_selecting_weapon:
+            if sword_on_table:
+                distance_to_table = (player.position - start_table_position).length()
+                if distance_to_table < pickup_radius:
+                    switch_to_table_view()
+                else:
+                    print(f"❌ Подойдите ближе к столу! ({distance_to_table:.1f}/{pickup_radius})")
+            return
+        if key == 'c' and weapon_selection_ui:
+            close_weapon_info()
+            return
+        if key == 'escape' and is_selecting_weapon:
+            # Возвращаемся к обычной камере
+            player.enabled = True
+            mouse.locked = True
+            is_selecting_weapon = False
+            camera_mode = "player"
+
+            if weapon_selection_text:
+                destroy(weapon_selection_text)
+                weapon_selection_text = None
+
+            camera.animate_position(player_camera_position, duration=1.0, curve=curve.in_out_cubic)
+            camera.animate_rotation(player_camera_rotation, duration=1.0, curve=curve.in_out_cubic)
+
+            weapons_list = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+            for weapon_obj in weapons_list:
+                if weapon_obj and hasattr(weapon_obj, 'original_color'):
+                    weapon_obj.color = weapon_obj.original_color
+            return
+
+        # Другие клавиши не обрабатываем до начала игры
+        return
     # ПЕРЕКЛЮЧЕНИЕ ОРУЖИЯ
     if key == '1':
         is_firing_auto = False  # ⬅️ ВАЖНО: сбрасываем автоматическую стрельбу
@@ -4597,15 +6879,15 @@ def input(key):
         player.speed = normal_speed
         print("Спринт деактивирован!")
 
-    if key == 'e' and human_collider.hovered and not in_dialogue:
-        in_dialogue = True
-        dialogue_bg.enabled = True
-        npc_name.text = "Человек"
-        npc_line.text = "Привет! Рад тебя видеть. Что скажешь?"
-        button1.enabled = True
-        button2.enabled = True
-        press_e_text.enabled = False
-        player.enabled = False
+    # if key == 'e' and human_collider.hovered and not in_dialogue:
+    #     in_dialogue = True
+    #     dialogue_bg.enabled = True
+    #     npc_name.text = "Человек"
+    #     npc_line.text = "Привет! Рад тебя видеть. Что скажешь?"
+    #     button1.enabled = True
+    #     button2.enabled = True
+    #     press_e_text.enabled = False
+    #     player.enabled = False
 
     # if key == '1' and in_dialogue:
     #     close_dialogue()
@@ -4624,9 +6906,7 @@ def input(key):
         player.speed = sprint_speed
         print("Спринт активирован!")
     if key == 'p':
-
         print("💊 Принудительный респавн аптечек!")
-
 
     if key == 'shift up':
         is_sprinting = False
@@ -4634,7 +6914,6 @@ def input(key):
         player.speed = normal_speed
         print("Спринт деактивирован!")
     if key == 'o':
-
         print("🔫 Принудительный респавн патронов!")
 
     if key == 'n':  # клавиша ]
@@ -4654,8 +6933,39 @@ def input(key):
     if key == 'f5':  # Ручная очистка
         cleaned = safe_render_cleanup()
         print(f"🧹 Ручная очистка: {cleaned} объектов")
-
-
+    # if key == 'e' and not game_started and not is_selecting_weapon:
+    #     if sword_on_table:  # Проверяем что стол создан
+    #         distance_to_table = (player.position - start_table_position).length()
+    #         if distance_to_table < pickup_radius:
+    #             switch_to_table_view()
+    #         else:
+    #             print(f"❌ Подойдите ближе к столу! ({distance_to_table:.1f}/{pickup_radius})")
+    #     return
+    #
+    #     # ВЫХОД ИЗ РЕЖИМА ВЫБОРА (ESC)
+    # if key == 'escape' and is_selecting_weapon and not game_started:
+    #     # Возвращаемся к обычной камере
+    #     player.enabled = True
+    #     mouse.locked = True
+    #     is_selecting_weapon = False
+    #     camera_mode = "player"
+    #
+    #     # Убираем текст выбора
+    #     if weapon_selection_text:
+    #         destroy(weapon_selection_text)
+    #         weapon_selection_text = None
+    #
+    #     # Возвращаем камеру к игроку
+    #     camera.animate_position(player_camera_position, duration=1.0, curve=curve.in_out_cubic)
+    #     camera.animate_rotation(player_camera_rotation, duration=1.0, curve=curve.in_out_cubic)
+    #
+    #     # Возвращаем оригинальные цвета оружиям
+    #     weapons = [sword_on_table, axe_on_table, copie_on_table, main_weapon_on_table]
+    #     for weapon in weapons:
+    #         if weapon and hasattr(weapon, 'original_color'):
+    #             weapon.color = weapon.original_color
+    #
+    #     return
 
 
 def close_dialogue():
@@ -4671,31 +6981,28 @@ def close_dialogue():
 button1.on_click = close_dialogue
 button2.on_click = close_dialogue
 
+# ==================== ИНИЦИАЛИЗАЦИЯ ИГРЫ ====================
 
-def start_game():
-    """Запускает игру с первой стадии"""
-    global current_stage, enemies_spawned_for_current_stage
+print("🎮 Инициализация игры...")
 
-    current_stage = 1
-    enemies_spawned_for_current_stage = False
+# Создаем стартовую сцену с оружием
+create_start_scene()
 
-    # ИНИЦИАЛИЗИРУЕМ ШЕЙДЕР С НУЛЕВОЙ ИНТЕНСИВНОСТЬЮ
-    update_shader_intensity()
-
-    print("🎮 Игра началась! Запускаем анимацию Stage 1...")
-
-    # Сразу запускаем анимацию для Stage 1
-    start_stage_animation(1)
-
-
+# Инициализируем оружия (но они будут скрыты до начала игры)
 init_weapons()
 
-start_game()
+# Скрываем все оружия - они появятся только после начала игры
+for weapon_type in weapons:
+    weapons[weapon_type].enabled = False
 
+# Инициализируем оптимизированные системы
+init_optimized_systems()
 
+print("✅ Игра готова! Спускайтесь к оружию и нажмите E")
+print(f"📍 Ваша позиция: {player.position}")
+print(f"📍 Оружие внизу на позиции: (0, 0, 0)")
 
+# ==================== ЗАПУСК ====================
 
-create_health_hud()
-create_weapon_hud()
 if __name__ == "__main__":
     app.run()
