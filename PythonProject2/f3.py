@@ -8,7 +8,10 @@ import random
 from ursina import application
 from ursina import Shader
 import os, sys
-
+from direct.actor.Actor import Actor
+import os
+import hashlib
+import tempfile
 # ==================== НАСТРОЙКИ ПРОИЗВОДИТЕЛЬНОСТИ ====================
 loadPrcFileData('', 'sync-video False')
 loadPrcFileData('', 'clock-frame-rate 800')
@@ -1108,13 +1111,25 @@ class Enemy:
             self.setup_boss(position)
 
     def setup_normal(self, position):
+        """Создает анимированного врага"""
+        # Загружаем анимированную модель
+        self.actor = Actor("ghoul3.glTF")  # или другой путь
+
+        # Создаем Entity-обертку
         self.entity = Entity(
-            model='cube',
-            color=color.blue,
-            scale=(1, 2, 1),
             position=position,
+            scale=0.02,
             collider='box'
         )
+
+        # Прикрепляем актера к Entity
+        self.actor.reparent_to(self.entity)
+        self.actor.setH(180)
+
+        # Проигрываем анимацию
+        self.actor.loop("Ghoul.001")  # или другая анимация
+
+
         self.health = 1
         self.max_health = 1
         self.damage = 10
@@ -1126,13 +1141,20 @@ class Enemy:
         self.ranged_attack_range = 0
 
     def setup_medium(self, position):
+        """Создает анимированного среднего врага"""
+        self.actor = Actor("ghoul3.glTF")
+
         self.entity = Entity(
-            model='cube',
-            color=color.orange,
-            scale=(1.5, 3, 1.5),
             position=position,
+            scale=0.03,
             collider='box'
         )
+
+        self.actor.reparent_to(self.entity)
+        self.actor.setH(180)
+        self.actor.loop("Ghoul.001")
+
+
         self.health = 2
         self.max_health = 2
         self.damage = 15
@@ -1144,13 +1166,20 @@ class Enemy:
         self.ranged_attack_range = 50
 
     def setup_boss(self, position):
+        """Создает анимированного босса"""
+        self.actor = Actor("ghoul3.glTF")
+
         self.entity = Entity(
-            model='cube',
-            color=color.red,
-            scale=(3, 5, 3),
             position=position,
+            scale=0.04,
             collider='box'
         )
+
+        self.actor.reparent_to(self.entity)
+        self.actor.setH(180)
+        self.actor.loop("Ghoul.001")
+
+
         self.health = 5
         self.max_health = 5
         self.damage = 25
@@ -2885,19 +2914,76 @@ def check_stage_completion():
 
 def spawn_enemy_at_random_position(enemy_type):
     try:
-        # Генерируем случайную позицию на карте
-        x = random.uniform(-20, 20)
-        z = random.uniform(-20, 20)
+        # 3 зоны спавна врагов
+        spawn_zones = [
+            # Зона 1: (80, 5, 1) ± 10 единиц
+            {
+                "center": Vec3(80, 5, 1),
+                "range": 10,
+                "name": "Зона 1 (80, 5, 1)"
+            },
+            # Зона 2: (86, 14, -159) ± 10 единиц
+            {
+                "center": Vec3(86, 14, -159),
+                "range": 10,
+                "name": "Зона 2 (86, 14, -159)"
+            },
+            # Зона 3: (-68, 1, -181) ± 10 единиц
+            {
+                "center": Vec3(-68, 1, -181),
+                "range": 10,
+                "name": "Зона 3 (-68, 1, -181)"
+            }
+        ]
+
+        # Выбираем случайную зону
+        zone = random.choice(spawn_zones)
+
+        # Генерируем случайную позицию в выбранной зоне
+        x = random.uniform(zone["center"].x - zone["range"], zone["center"].x + zone["range"])
+        y = zone["center"].y  # Используем высоту зоны
+        z = random.uniform(zone["center"].z - zone["range"], zone["center"].z + zone["range"])
+
+        spawn_pos = Vec3(x, y, z)
+
+        print(f"📍 Спавн врага в {zone['name']}:")
+        print(f"   Центр: X={zone['center'].x:.1f}, Y={zone['center'].y:.1f}, Z={zone['center'].z:.1f}")
+        print(f"   Позиция: X={spawn_pos.x:.1f}, Y={spawn_pos.y:.1f}, Z={spawn_pos.z:.1f}")
 
         # Проверяем, чтобы враг не заспавнился слишком близко к игроку
-        spawn_pos = Vec3(x, 1, z)
-        if (spawn_pos - player.position).length() < 8:
+        if (spawn_pos - player.position).length() < 15:  # Увеличил до 15 единиц
             # Если слишком близко, пробуем еще раз
+            print(f"⚠️ Слишком близко к игроку ({spawn_pos - player.position}")
             return spawn_enemy_at_random_position(enemy_type)
 
         create_enemy(spawn_pos, enemy_type)
+
+        # Визуальная метка зоны спавна (для отладки)
+        if not hasattr(spawn_enemy_at_random_position, 'zone_indicators'):
+            spawn_enemy_at_random_position.zone_indicators = []
+            for i, zone_data in enumerate(spawn_zones):
+                indicator = Entity(
+                    model='wireframe_cube',
+                    color=color.rgba(1, 0, 0, 0.3),
+                    scale=(zone_data["range"] * 2, 5, zone_data["range"] * 2),
+                    position=zone_data["center"],
+                    eternal=True,
+                    enabled=False  # По умолчанию выключены
+                )
+                spawn_enemy_at_random_position.zone_indicators.append(indicator)
+
+        # Временное включение индикатора зоны
+        zone_index = spawn_zones.index(zone)
+        if spawn_enemy_at_random_position.zone_indicators[zone_index]:
+            spawn_enemy_at_random_position.zone_indicators[zone_index].enabled = True
+            invoke(lambda idx=zone_index: setattr(spawn_enemy_at_random_position.zone_indicators[idx], 'enabled', False)
+            if spawn_enemy_at_random_position.zone_indicators[idx] else None, delay=2.0)
+
         return True
-    except:
+    except Exception as e:
+        print(f"❌ Ошибка спавна врага: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -6314,9 +6400,6 @@ def show_congratulation():
     """Показывает поздравление и затемнение экрана"""
     global trigger_congratulation_text, trigger_fade_overlay
 
-    # Отключаем управление игроком
-    player.enabled = False
-
     # 1. Полное затемнение экрана
     trigger_fade_overlay = Entity(
         parent=camera.ui,
@@ -6339,7 +6422,9 @@ def show_congratulation():
         scale=0.1,  # Начинаем с маленького
         color=color.rgba(1, 0.84, 0, 0),  # Золотой, полностью прозрачный
         font='custom2.ttf',
-        eternal=False
+        eternal=False,
+        origin=(0,0),
+        z=-11
     )
 
     # Анимация появления текста
