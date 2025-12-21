@@ -592,6 +592,11 @@ walk = Audio('walk.ogg', loop=True, autoplay=False)
 jump = Audio('jump.ogg', loop=False, autoplay=False)
 shoot_sound = Audio("shoot.ogg", autoplay=False, lood=False)
 shoot_sound2 = Audio('shoot2.ogg', loop=False, autoplay=False)
+
+button_hover_sound = Audio('button1.mp3', loop=False, autoplay=False)
+button_click_sound = Audio('button2.mp3', loop=False, autoplay=False)
+
+
 dark_fantasy_shader = Shader(language=Shader.GLSL,
                              fragment='''
 #version 140
@@ -724,9 +729,10 @@ ground = Entity(color=color.clear, collider='box',
 
 player = FirstPersonController(collider='sphere')
 player.position_y = 10
-player.position = (0, 86, 0)
+player.position = (-45, 86, 0)
 player.camera_pivot.y = 3
 player.cursor.visible = True
+player.rotation_y=80
 
 # ---------------------------
 # ШЕЙДЕР НАЗНАЧАЕМ ТУТ!!!
@@ -1230,6 +1236,264 @@ weapons_data = {
         "icon_color": color.rgba(0.8, 0.6, 0.4, 1)  # Бежевый
     }
 }
+
+menu_active = False
+menu_background = None
+menu_buttons = []
+menu_title = None
+
+# ==================== ГЛАВНОЕ МЕНЮ ====================
+character_selection_active = False
+selected_character = None
+character_selection_hud = None
+character_back_button = None
+character_select_button = None
+character_descriptions = None
+character_images = []
+
+
+def create_main_menu():
+    """Создает главное меню (точно как в старом коде)"""
+    global menu_background, menu_active
+
+    menu_active = True
+
+    # Серый фон на весь экран
+    menu_background = Entity(
+        parent=camera.ui,
+        model='quad',
+        texture='Main_Menu.png',
+        scale=(2,1),
+        z=1
+    )
+
+    # Заголовок игры
+    title = Text(
+        parent=camera.ui,
+        text="SchizoProject DarkFantasy",
+        position=(0.4, 0.45, 0),
+        scale=3,
+        color=color.white,
+        origin=(0, 0),
+        z=-1,
+        font='custom2.ttf'
+    )
+
+    # Кнопка Play
+    play_button = Button(
+        parent=camera.ui,
+        text='PLAY',
+        color=color.clear,
+        scale=(0.5, 0.3),
+        position=(-0.7, 0.25, 0),
+        z=-1,
+        on_click=lambda: play_sound_and_start(),
+        highlight_sound='button1.mp3',
+        text_size=2
+    )
+    play_button.text_entity.font='custom2.ttf'
+    # Кнопка Credits
+    credits_button = Button(
+        parent=camera.ui,
+        text='CREDITS',
+        color=color.clear,
+        scale=(0.5, 0.3),
+        position=(-0.7, 0.05, 0),
+        z=-1,
+        on_click=lambda: [button_click_sound.play(), show_credits()],
+        highlight_sound='button1.mp3',
+        text_size=2
+    )
+    credits_button.text_entity.font = 'custom2.ttf'
+    # Кнопка Exit
+    exit_button = Button(
+        parent=camera.ui,
+        text='EXIT',
+        color=color.clear,
+        scale=(0.5, 0.3),
+        position=(-0.7, -0.14, 0),
+        z=-1,
+        on_click=lambda: [button_click_sound.play(), exit_game()],
+        highlight_sound='button1.mp3',
+        text_size=2
+    )
+    exit_button.text_entity.font = 'custom2.ttf'
+    # Разблокируем курсор для меню
+    mouse.locked = False
+    mouse.visible = True
+
+    # Отключаем управление игроком
+    player.enabled = False
+
+    print("📋 Главное меню создано")
+
+
+def start_game_from_menu():
+    """Запускает игру из меню (без изменения game_state)"""
+    global menu_active, game_started
+
+    print("🎮 Запуск игры из меню...")
+
+    # Удаляем меню
+    destroy_menu()
+
+    # Сбрасываем флаг начала игры (чтобы начальная сцена работала)
+    game_started = False
+
+    # Блокируем курсор для игры
+    mouse.locked = True
+    mouse.visible = False
+
+    # Включаем управление игроком
+    player.enabled = True
+
+    # Активируем оружие на столе (если было отключено)
+    if sword_on_table:
+        sword_on_table.enabled = True
+    if axe_on_table:
+        axe_on_table.enabled = True
+    if copie_on_table:
+        copie_on_table.enabled = True
+    if main_weapon_on_table:
+        main_weapon_on_table.enabled = True
+    if table_highlight:
+        table_highlight.enabled = True
+
+    # Обновляем текст подсказки
+    if pickup_text:
+        pickup_text.enabled = False
+        pickup_text.text = "Нажмите E чтобы осмотреть оружие"
+
+    # Создаем коллайдеры для взаимодействия
+    create_weapon_colliders()
+
+    menu_active = False
+    print("✅ Игра начата! Подойдите к столу и нажмите E")
+
+
+def show_credits():
+    """Показывает окно с кредитами (точно как в старом коде)"""
+    print("📜 Окно кредитов открыто")
+
+    # Затемнение фона
+    credits_background = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.rgba(0, 0, 0, 0.8),
+        scale=(2, 2),
+        z=-2
+    )
+
+    # Окно кредитов
+    credits_window = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.rgba(0.1, 0.1, 0.2, 0.95),
+        scale=(1.2, 1.0),
+        position=(0, 0, 0),
+        z=-3
+    )
+
+    # Заголовок кредитов
+    credits_title = Text(
+        parent=camera.ui,
+        text="CREDITS",
+        position=(0, 0.35, 0),
+        scale=3,
+        color=color.gold,
+        origin=(0, 0),
+        z=-4
+    )
+
+    # Текст кредитов
+    credits_content = """DARK FANTASY SURVIVAL
+
+Game Developer: You
+Game Design: You
+Programming: Python + Ursina
+3D Models: Various Sources
+Sound Effects: Free Sounds
+
+Special Thanks:
+- Ursina Engine
+- Python Community
+
+Version: 1.0
+© 2024 All Rights Reserved"""
+
+    credits_text = Text(
+        parent=camera.ui,
+        text=credits_content,
+        position=(0, 0, 0),
+        scale=1.5,
+        color=color.white,
+        origin=(0, 0),
+        line_height=1.5,
+        z=-4
+    )
+
+    # Кнопка закрытия (крестик)
+    close_button = Button(
+        parent=camera.ui,
+        text='✕',
+        color=color.red,
+        scale=(0.05, 0.05),
+        position=(0.55, 0.4, 0),
+        on_click=lambda: close_credits(credits_background, credits_window, credits_title, credits_text, close_button),
+        z=-5
+    )
+
+
+def close_credits(credits_background, credits_window, credits_title, credits_text, close_button):
+    """Закрывает окно кредитов"""
+    print("📜 Окно кредитов закрыто")
+
+    # Удаляем все элементы кредитов
+    destroy(credits_background)
+    destroy(credits_window)
+    destroy(credits_title)
+    destroy(credits_text)
+    destroy(close_button)
+
+
+
+
+def exit_game():
+    """Выход из игры"""
+    print("👋 Выход из игры...")
+    application.quit()
+
+
+def destroy_menu():
+    """Удаляет только элементы главного меню по именам"""
+    global menu_background
+
+    # Удаляем элементы по их именам или ссылкам
+    # Серый фон
+    if menu_background:
+        destroy(menu_background)
+        menu_background = None
+
+    # Удаляем все элементы с родителем camera.ui и определенными именами/свойствами
+    for entity in scene.entities:
+        if entity.parent == camera.ui:
+            # Удаляем только элементы меню
+            if hasattr(entity, 'text'):
+                if entity.text in ["DARK FANTASY SURVIVAL", "PLAY", "CREDITS", "EXIT"]:
+                    destroy(entity)
+
+    print("📋 Главное меню удалено")
+
+
+
+def play_sound_and_start():
+    """Простая функция для кнопки PLAY"""
+    button_click_sound.play()
+    invoke(start_game_from_menu, delay=0.2)  # Ждем звук
+
+
+
+
 
 weapon_selection_ui = None
 selected_weapon = None
@@ -2197,8 +2461,16 @@ def create_wall(p1, p2, thickness=0.3, height=1, color_wall=color.gray):
 
 sky = Sky()
 location = Entity(model='1_location.glb', scale=5, position=(0, 150, 0), shader=dark_fantasy_shader)
-cl2_1 = Entity(model='cube', scale=(100, 2, 100), position=(0, 76, 0), rotation=(0, 0, 0), color=color.white,
+cl2_1 = Entity(model='cube', scale=(100, 2, 100), position=(0, 75, 0), rotation=(0, 0, 0), color=color.clear,
                collider='box')
+cl2_2 = Entity(model='cube', scale=(10, 2, 10), position=(18, 75, 0), rotation=(0, 0, -45), color=color.clear,
+               collider='box')
+cl2_3 = Entity(model='cube', scale=(6, 0.1, 20), position=(5, 75, 0), rotation=(0, 0, -45), color=color.clear,
+               collider='box')
+cl2_4 = Entity(model='cube', scale=(20,0.1, 20), position=(17, 77, 0), rotation=(0, 0, 0), color=color.clear,
+               collider='box')
+
+
 location2 = Entity(model='locationtest2.glb', scale=80, position=(0, 1, 0), )
 cl1 = Entity(model='cube', scale=(1, 20, 40), position=(-16, 0, -290), color=color.clear,
              collider='box')
@@ -2229,6 +2501,11 @@ create_wall((97, 0, -98), (93, 0, -129), height=40)
 create_wall((93, 0, -129), (98, 0, -171), height=40)
 create_wall((98, 0, -171), (59.3, 0, -173.54), height=40)
 create_wall((10, 1, -10), (41, 1, -14), height=80)
+
+create_wall((40,70,4.5),(-60,70,4.5),height=40)
+create_wall((40,70,-4.5),(-60,70,-4.5),height=40)
+create_wall((21,70,-4.5),(21,70,4.5),height=40)
+create_wall((-50,70,-4.5),(-50,70,4.5),height=40)
 
 cl3 = Entity(model='cube', scale=(20, 30, 13), position=(-60, 0, -157), rotation=(0, 12, 0), color=color.clear,
              collider='box')
@@ -4386,7 +4663,7 @@ def create_grenade_shot():
 
     # Эффект выстрела для гранатомета
     create_muzzle_flash()
-    grenade_effect = 1.0
+    grenade_effect = 0
 
 
 def update_explosive_projectiles():
@@ -5716,7 +5993,7 @@ def find_valid_spawn_position():
     if zone_choice == 0:
         # ПЕРВАЯ ЗОНА: основная (как было)
         center_x = 53
-        center_y = 1.5
+        center_y = 2
         center_z = -81
 
         # Размеры области
@@ -5727,7 +6004,7 @@ def find_valid_spawn_position():
     else:
         # ВТОРАЯ ЗОНА: радиус 25 от точки (-31, 1, -178)
         center_x = -31
-        center_y = 1.5
+        center_y = 2
         center_z = -178
 
         # Размеры области (радиус 25, значит квадрат 50x50)
@@ -6482,6 +6759,14 @@ def update():
     global target_weapon_rotation, current_weapon_rotation, target_weapon_position, current_weapon_position, mouse_movement
     global stun_effect_time, is_stunned, shoot_strength, reload_strength, walk_strength, shader_enabled, grenade_effect
     global lvl, shader_intensity
+    if menu_active:
+        camera.set_shader_input("time", time.time())
+        camera.set_shader_input("base_intensity", 0.0)
+        camera.set_shader_input("shoot_strength", 0.0)
+        camera.set_shader_input("reload_strength", 0.0)
+        camera.set_shader_input("walk_strength", 0.0)
+        camera.set_shader_input("grenade_effect", 0.0)
+        return
     if game_started and trigger_area:
         check_trigger()
     if random.random() < 0.5:  # 50% шанс обновления каждый кадр
@@ -6497,6 +6782,11 @@ def update():
     # =========== ЕСЛИ ИГРА НЕ НАЧАЛАСЬ ===========
     # =========== ЕСЛИ ИГРА НЕ НАЧАЛАСЬ ===========
     if not game_started:
+        # Только добавьте проверку на menu_active в key-обработчиках:
+        if held_keys['e'] and not is_selecting_weapon and not menu_active:
+            distance_to_table = (player.position - start_table_position).length()
+            if distance_to_table < pickup_radius:
+                switch_to_table_view()
 
         # МИНИМАЛЬНЫЕ ОБНОВЛЕНИЯ ДЛЯ ЛОББИ
         camera.set_shader_input("time", time.time())
@@ -6546,7 +6836,6 @@ def update():
     camera.set_shader_input("time", time.time())
 
     if shader_enabled:
-        grenade_effect = max(0, grenade_effect - time.dt * 2)
         shoot_strength = max(0, shoot_strength - time.dt * 4)
         reload_strength = max(0, reload_strength - time.dt * 1.2)
 
@@ -7082,7 +7371,7 @@ for weapon_type in weapons:
 
 # Инициализируем оптимизированные системы
 init_optimized_systems()
-
+create_main_menu()
 print("✅ Игра готова! Спускайтесь к оружию и нажмите E")
 print(f"📍 Ваша позиция: {player.position}")
 print(f"📍 Оружие внизу на позиции: (0, 0, 0)")
