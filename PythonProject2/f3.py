@@ -12,11 +12,15 @@ from direct.actor.Actor import Actor
 import os
 import hashlib
 import tempfile
+import pygame
+pygame.mixer.init()
+sound3 = pygame.mixer.Sound('delete2.mp3')
+sound3.play(loops=-1)
 # ==================== НАСТРОЙКИ ПРОИЗВОДИТЕЛЬНОСТИ ====================
 loadPrcFileData('', 'sync-video False')
 loadPrcFileData('', 'clock-frame-rate 800')
 loadPrcFileData('', 'show-frame-rate-meter True')
-
+shader_permanent_disable=True
 
 # ==================== ОПТИМИЗИРОВАННЫЕ СИСТЕМЫ ====================
 
@@ -729,10 +733,10 @@ ground = Entity(color=color.clear, collider='box',
 
 player = FirstPersonController(collider='sphere')
 player.position_y = 10
-player.position = (-45, 86, 0)
+player.position = (-45, 76, 0)
 player.camera_pivot.y = 3
 player.cursor.visible = True
-player.rotation_y=80
+player.rotation_y=70
 
 # ---------------------------
 # ШЕЙДЕР НАЗНАЧАЕМ ТУТ!!!
@@ -812,7 +816,8 @@ is_firing_auto = False
 
 last_fire_time = 0
 auto_fire_delay = 0.05
-
+# Добавьте эту строку в раздел глобальных переменных (примерно строка 180-200)
+shader_test_window = None
 # ДОБАВИМ ПЕРЕМЕННЫЕ ДЛЯ ЭФФЕКТА ОГЛУШЕНИЯ
 stun_effect_intensity = 0.3  # Сила эффекта оглушения
 stun_effect_duration = 0.1  # Длительность эффекта
@@ -1250,6 +1255,7 @@ character_back_button = None
 character_select_button = None
 character_descriptions = None
 character_images = []
+char_selection = None
 
 
 def create_main_menu():
@@ -1263,7 +1269,7 @@ def create_main_menu():
         parent=camera.ui,
         model='quad',
         texture='Main_Menu.png',
-        scale=(2,1),
+        scale=(2, 1),
         z=1
     )
 
@@ -1291,7 +1297,8 @@ def create_main_menu():
         highlight_sound='button1.mp3',
         text_size=2
     )
-    play_button.text_entity.font='custom2.ttf'
+    play_button.text_entity.font = 'custom2.ttf'
+
     # Кнопка Credits
     credits_button = Button(
         parent=camera.ui,
@@ -1305,6 +1312,7 @@ def create_main_menu():
         text_size=2
     )
     credits_button.text_entity.font = 'custom2.ttf'
+
     # Кнопка Exit
     exit_button = Button(
         parent=camera.ui,
@@ -1318,6 +1326,21 @@ def create_main_menu():
         text_size=2
     )
     exit_button.text_entity.font = 'custom2.ttf'
+
+    # КНОПКА TEST (ДОБАВЛЕНА В ПРАВОМ НИЖНЕМ УГЛУ)
+    test_button = Button(
+        parent=camera.ui,
+        text='TEST',
+        color=color.black33,
+        scale=(0.2, 0.1),
+        position=(0.8, -0.4, 0),  # Правый нижний угол
+        z=-1,
+        on_click=lambda: [button_click_sound.play(), show_shader_test()],
+        highlight_sound='button1.mp3',
+        text_size=1.5
+    )
+    test_button.text_entity.font = 'custom2.ttf'
+
     # Разблокируем курсор для меню
     mouse.locked = False
     mouse.visible = True
@@ -1326,6 +1349,210 @@ def create_main_menu():
     player.enabled = False
 
     print("📋 Главное меню создано")
+
+
+def show_shader_test():
+    """Показывает окно тестирования шейдеров"""
+    print("🎛️ Окно тестирования шейдеров открыто")
+
+    # Блокируем кнопки главного меню
+    blocked_main_buttons = []
+    for entity in scene.entities:
+        if entity.parent == camera.ui and hasattr(entity, 'text'):
+            if entity.text in ["PLAY", "CREDITS", "EXIT", "TEST"]:
+                entity.enabled = False
+                blocked_main_buttons.append(entity)
+
+    # Создаем фон с текстурой меню и применяем шейдер к НЕМУ
+    menu_background_shader = Entity(
+        parent=camera.ui,
+        model='quad',
+        texture='Main_Menu.png',  # Используем текстуру меню
+        scale=(2, 1),
+        position=(0, 0, 0),
+        z=-10,
+        shader=master_shader  # Используем ваш основной шейдер
+    )
+
+    # Устанавливаем параметры шейдера для теста
+    global shader_intensity
+    shader_intensity = 1.0  # Максимальная интенсивность для теста
+
+    # Устанавливаем ВСЕ uniform-переменные
+    menu_background_shader.set_shader_input("base_intensity", shader_intensity)
+    menu_background_shader.set_shader_input("shoot_strength", 0.0)  # Без пульсации
+    menu_background_shader.set_shader_input("reload_strength", 0.0)
+    menu_background_shader.set_shader_input("walk_strength", 0.0)
+    menu_background_shader.set_shader_input("grenade_effect", 0.0)  # Без вспышек
+    menu_background_shader.set_shader_input("time", time.time())
+
+    print(f"⚡ shader_intensity = {shader_intensity}")
+    print("🎨 Основной шейдер игры применен к фону меню")
+
+    # Создаем ПОЛУПРОЗРАЧНЫЙ фон для UI элементов (black66 - темный полупрозрачный)
+    ui_background = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.black66,  # Используем black66 вместо черного
+        scale=(1.5, 0.8),
+        position=(0, 0, 0),
+        z=-15
+    )
+
+    # Текст предупреждения
+    warning_text = Text(
+        parent=camera.ui,
+        text="ТЕСТ ШЕЙДЕРА\nЕсли видите КРАСНЫЕ полосы и искажения - отключите шейдер\nЕсли видите нежный красный цвет - оставить",
+        position=(0, 0.3, 0),
+        scale=1.8,
+        color=color.yellow,
+        origin=(0, 0),
+        z=-20,
+        font='custom2.ttf'
+    )
+
+    # Информация о параметрах
+    params_text = Text(
+        parent=camera.ui,
+        text=f"base_intensity: {shader_intensity:.1f}\ntime: {time.time():.1f}",
+        position=(-0.8, 0.0, 0),
+        scale=1.5,
+        color=color.cyan,
+        origin=(0, 0),
+        z=-20
+    )
+
+    # Создаем контейнер для данных теста
+    shader_test_data = {
+        'menu_background': menu_background_shader,
+        'ui_background': ui_background,
+        'warning_text': warning_text,
+        'params_text': params_text,
+        'blocked_buttons': blocked_main_buttons,
+        'buttons': [],
+        'is_active': True
+    }
+
+    # Кнопки
+    keep_button = Button(
+        parent=camera.ui,
+        text='ОСТАВИТЬ',
+        color=color.black33,
+        scale=(0.25, 0.08),
+        position=(-0.3, -0.3, 0),
+        z=-20,
+        on_click=lambda: [button_click_sound.play(), keep_shaders(shader_test_data)],
+        highlight_sound='button1.mp3',
+        text_size=1.5
+    )
+
+    disable_button = Button(
+        parent=camera.ui,
+        text='ОТКЛЮЧИТЬ',
+        color=color.black33,
+        scale=(0.25, 0.08),
+        position=(0.3, -0.3, 0),
+        z=-20,
+        on_click=lambda: [button_click_sound.play(), disable_shaders(shader_test_data)],
+        highlight_sound='button1.mp3',
+        text_size=1.5
+    )
+
+    shader_test_data['buttons'].extend([keep_button, disable_button])
+
+    global shader_test_window
+    shader_test_window = shader_test_data
+
+    global menu_active
+    menu_active = False
+
+    # Функция для обновления времени в шейдере (без пульсации)
+    def update_shader_time():
+        if (shader_test_window and
+                'menu_background' in shader_test_window and
+                shader_test_window.get('is_active', True)):
+
+            menu_bg = shader_test_window['menu_background']
+            if menu_bg and menu_bg.enabled:
+                # ТОЛЬКО обновляем время, без пульсации
+                menu_bg.set_shader_input("time", time.time())
+
+                # Обновляем текст параметров
+                if shader_test_window.get('params_text'):
+                    shader_test_window['params_text'].text = (
+                        f"base_intensity: {shader_intensity:.1f}\n"
+                        f"time: {time.time():.2f}"
+                    )
+
+                invoke(update_shader_time, delay=1 / 30)
+
+    # Запускаем обновление времени
+    update_shader_time()
+
+
+def keep_shaders(shader_test_data):
+    global shader_permanent_disable
+    """Оставляет шейдеры включенными и возвращает в меню"""
+    print("✅ Шейдеры оставлены включенными")
+    close_shader_test(shader_test_data)
+    shader_permanent_disable = True
+
+
+def disable_shaders(shader_test_data):
+    global shader_permanent_disable
+    """Отключает шейдеры и возвращает в меню"""
+    global shader_intensity
+    shader_intensity = 0.0
+    print("❌ Шейдеры отключены (shader_intensity = 0)")
+    close_shader_test(shader_test_data)
+    shader_permanent_disable = False
+
+
+def close_shader_test(shader_test_data):
+    """Закрывает окно тестирования шейдеров"""
+    print("🎛️ Окно тестирования шейдеров закрыто")
+
+    # Помечаем окно как неактивное
+    shader_test_data['is_active'] = False
+
+    # Восстанавливаем кнопки главного меню
+    for button in shader_test_data.get('blocked_buttons', []):
+        if button:
+            button.enabled = True
+
+    # Удаляем все элементы теста шейдеров
+    entities_to_destroy = []
+
+    # Собираем все элементы для удаления
+    elements = [
+        shader_test_data.get('menu_background'),
+        shader_test_data.get('ui_background'),
+        shader_test_data.get('warning_text'),
+        shader_test_data.get('params_text')
+    ]
+
+    # Добавляем кнопки
+    for button in shader_test_data.get('buttons', []):
+        if button:
+            elements.append(button)
+
+    # Уничтожаем все элементы
+    for entity in elements:
+        if entity:
+            try:
+                destroy(entity)
+            except:
+                pass
+
+    # Восстанавливаем меню
+    global menu_active, shader_test_window
+    menu_active = True
+    shader_test_window = None
+
+    # Убираем шейдер с камеры
+    camera.shader = None
+
+    print("📋 Возврат в главное меню")
 
 
 def start_game_from_menu():
@@ -1397,29 +1624,33 @@ def show_credits():
     # Заголовок кредитов
     credits_title = Text(
         parent=camera.ui,
-        text="CREDITS",
+        text="",
         position=(0, 0.35, 0),
-        scale=3,
+        scale=0.1,
         color=color.gold,
         origin=(0, 0),
         z=-4
     )
 
     # Текст кредитов
-    credits_content = """DARK FANTASY SURVIVAL
-
-Game Developer: You
-Game Design: You
-Programming: Python + Ursina
-3D Models: Various Sources
-Sound Effects: Free Sounds
-
-Special Thanks:
-- Ursina Engine
-- Python Community
-
-Version: 1.0
-© 2024 All Rights Reserved"""
+    credits_content = """Автор модели ghoul3.gltf   DivyeSh.PanchAl
+https://sketchfab.com/DivyeSh.PanchAl
+Автор модели 1_location.glb   aurelien_martel
+https://sketchfab.com/aurelien_martel
+Автор модели copie.glb DafVader
+https://sketchfab.com/DafVader
+Автор модели Axe.glb   itsyagirl_amber
+https://sketchfab.com/itsyagirl_amber
+Автор модели sword.glb minghau
+https://sketchfab.com/minghau
+Автор модели dual_uzi.glb и decore_dual_uzi.glb user77
+https://sketchfab.com/user77
+Автор модели weanpo14.glb и decore_weanpo.glb  ccransh
+https://sketchfab.com/ccransh
+Автор модели heal_pickup.glb и ammo_pickup2.glb  n0stardust
+https://sketchfab.com/noortjeschuur
+Автор модели pistol.glb grenade.glb и decore_grenade.glb decore_pistol.glb DJMaesen
+https://sketchfab.com/bumstrum"""
 
     credits_text = Text(
         parent=camera.ui,
@@ -1439,8 +1670,9 @@ Version: 1.0
         color=color.red,
         scale=(0.05, 0.05),
         position=(0.55, 0.4, 0),
-        on_click=lambda: close_credits(credits_background, credits_window, credits_title, credits_text, close_button),
-        z=-5
+        on_click=lambda: [close_credits(credits_background, credits_window, credits_title, credits_text, close_button),button_click_sound.play()],
+        z=-5,
+        highlight_sound='button1.mp3'
     )
 
 
@@ -1479,17 +1711,425 @@ def destroy_menu():
         if entity.parent == camera.ui:
             # Удаляем только элементы меню
             if hasattr(entity, 'text'):
-                if entity.text in ["DARK FANTASY SURVIVAL", "PLAY", "CREDITS", "EXIT"]:
+                if entity.text in ["DARK FANTASY SURVIVAL", "PLAY", "CREDITS", "EXIT","TEST"]:
                     destroy(entity)
 
     print("📋 Главное меню удалено")
 
 
+def show_character_selection():
+    """Показывает меню выбора персонажа (новый HUD поверх главного меню)"""
+    print("👤 Открыт выбор персонажа")
 
+    # Сохраняем ссылки на заблокированные кнопки
+    blocked_main_buttons = []
+
+    # БЛОКИРУЕМ кнопки главного меню
+    for entity in scene.entities:
+        if entity.parent == camera.ui and hasattr(entity, 'text'):
+            if entity.text in ["PLAY", "CREDITS", "EXIT"]:
+                entity.enabled = False  # Отключаем кнопку
+                blocked_main_buttons.append(entity)
+
+    # Фон для всего экрана
+    char_bg = Entity(
+        parent=camera.ui,
+        model='quad',
+        texture='Main_Menu2.png',
+        scale=(2, 1),
+        z=-20
+    )
+
+    # Основное окно выбора персонажа
+    char_window = Entity(
+        parent=camera.ui,
+        model='quad',
+        texture='Main_Menu2.png',
+        scale=(2, 1),
+        z=-21
+    )
+
+    # Заголовок
+    char_title = Text(
+        parent=camera.ui,
+        text="ВЫБЕРИТЕ ПЕРСОНАЖА",
+        position=(0, 0.4, 0),
+        scale=2.5,
+        color=color.gold,
+        origin=(0, 0),
+        z=-22
+    )
+
+    char_selection_data = {
+        'background': char_bg,
+        'window': char_window,
+        'title': char_title,
+        'characters': [],
+        'selected_char': None,
+        'name_bg': None,
+        'name_text': None,
+        'desc_bg': None,
+        'description_text': None,
+        'select_button': None,
+        'close_button': None,
+        'blocked_main_buttons': blocked_main_buttons
+    }
+
+    # Данные персонажей (4 штуки)
+    characters_data = [
+        {
+            'name': 'Рыцарь-Палач Гартмунд',
+            'image': 'Person1.png',
+            'description': 'Когда-то Гартмунд был главным палачом Гнилой Короны. Он рубил головы не только преступникам, но и знати, заподозренной в ереси. \nОднажды, выполняя приказ, он обезглавил свою собственную одержимую жену.\nС тех пор в его доспехах, пропитанных ржавчиной и старым пеплом, слышится шепот её проклятий.\nТеперь он бродит по землям, добровольно ища преступников и верша свой извращённый суд.',
+            'position': (-0.66, 0.14),
+            'color': color.rgb(180, 100, 100)
+        },
+        {
+            'name': 'Копьеносец Аморай "Страж Порога"',
+            'image': 'Person2.png',
+            'description': 'Аморай был капитаном стражей у Великого Разлома  пропасти, откуда выползали твари из иных миров.\nВо время Тихого Нашествия невидимые сущности прошли сквозь его ряды, не тронув плоть, но иссушив души его товарищей. \nОн один устоял, оцепенев от ужаса. Теперь он  вечный часовой. \nЕго доспехи слились со скалой у края пропасти, а копьё стало частью его руки. \nОн не спит и не ест, лишь безмолвно пронзает всё, что пытается выбраться наружу, став первым и последним бастионом мира людей.',
+            'position': (-0.22, 0.14),
+            'color': color.rgb(100, 180, 100)
+        },
+        {
+            'name': 'Мечник Сигизмунд Проклятая Плоть',
+            'image': 'Person3.png',
+            'description': 'Сигизмунд, искавший славы, похитил сердце древнего червя, чтобы выковать себе неуязвимые доспехи. \nРитуал удался, но цена была ужасна: его собственная плоть срослась с металлом, который теперь питается его жизненной силой. \nДоспех живёт, медленно переваривая рыцаря изнутри. В моменты агонии Сигизмунд может слышать шепот червя, направляющий его клинок. \nОн ищет могущественных некромантов и демонологов в тщетной надежде, что кто-то сможет разорвать этот симбиоз.',
+            'position': (0.22, 0.14),
+            'color': color.rgb(100, 100, 180)
+        },
+        {
+            'name': 'Последний Выстрел',
+            'image': 'Person4.png',
+            'description': 'В эпоху, когда магия стала непредсказуемой, гильдия инженеров-еретиков создала Громовержцев  отряд, \nвооружённый оружием, стреляющим сгустками хаоса. Вальтер был среди них. \nВ решающей битве заряд в его ружье Сновидец вышел из-под контроля, порвав ткань реальности и поглотив всю его роту в вечный кошмар. \nТеперь Вальтер, ослепший от вспышки, но видящий через прицельную планку призраки своих жертв, бродит по полям сражений. \nЕго ружьё жаждет патронов  костей павших воинов, а он сам верит, что последний выстрел сможет закрыть портал, \nкоторый сам же и открыл, отпустив души товарищей.',
+            'position': (0.66, 0.14),
+            'color': color.rgb(180, 180, 100)
+        }
+    ]
+
+    # Создаем карточки персонажей (картинки)
+    for char_data in characters_data:
+        # Рамка для картинки
+        char_frame = Entity(
+            parent=camera.ui,
+            model='quad',
+            color=color.rgb(80, 80, 80),
+            scale=(0.44, 0.44),
+            position=char_data['position'],
+            z=-23
+        )
+
+        # Картинка персонажа
+        try:
+            char_image = Entity(
+                parent=camera.ui,
+                model='quad',
+                texture=char_data['image'],
+                scale=(0.43, 0.43),
+                position=char_data['position'],
+                z=-24
+            )
+        except:
+            # Если нет текстуры - цветной квадрат
+            char_image = Entity(
+                parent=camera.ui,
+                model='quad',
+                color=char_data['color'],
+                scale=(0.18, 0.28),
+                position=char_data['position'],
+                z=-24
+            )
+
+            # Имя на квадрате
+            Text(
+                parent=camera.ui,
+                text=char_data['name'],
+                position=(char_data['position'][0], char_data['position'][1] - 0.25, 0),
+                scale=1.2,
+                color=color.white,
+                origin=(0, 0),
+                z=-25
+            )
+
+        # Кнопка для выбора
+        char_button = Button(
+            parent=camera.ui,
+            model='quad',
+            color=color.clear,
+            scale=(0.4, 0.4),
+            position=char_data['position'],
+            z=-26,
+            on_click=lambda ch=char_data: select_character(ch, char_selection_data),
+            highlight_sound='button1.mp3'
+        )
+
+        char_selection_data['characters'].append({
+            'frame': char_frame,
+            'image': char_image,
+            'button': char_button,
+            'data': char_data
+        })
+
+    # ================= ОБЛАСТЬ ДЛЯ ИМЕНИ ПЕРСОНАЖА =================
+    # Фон для имени персонажа - изначально скрыт
+    name_bg = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.clear,
+        scale=(0.4, 0.15),
+        position=(0, -0.23, 0),  # Позиция имени
+        z=-23,
+        enabled=False
+    )
+
+    # Текст имени персонажа
+    name_text = Text(
+        parent=camera.ui,
+        text="",  # Изначально пусто
+        position=(-0.2, -0.4, 0),  # Та же позиция что и у фона
+        scale=2,
+        color=color.gold,
+        origin=(0, 0),
+        z=-24,
+        enabled=False,
+        font='custom2.ttf'
+    )
+
+    # Область для описания - изначально скрыта
+    desc_bg = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.clear,
+        scale=(1.0, 0.3),
+        position=(0, -0.3, 0),
+        z=-23,
+        enabled=False
+    )
+
+    # Текст описания
+    description_text = Text(
+        parent=camera.ui,
+        text="Выберите персонажа",
+        position=(-0.85, -0.11, 0),
+        scale=1.1,
+        color=color.white,
+        line_height=1.3,
+        z=-24,
+        enabled=False,
+        font='custom3.otf'
+    )
+    # Кнопка "Выбрать" - изначально скрыта
+    select_button = Button(
+        parent=camera.ui,
+        text='',
+        color=color.clear,
+        scale=(0.45, 0.1),
+        position=(0.74, -0.39, 0),
+        z=-25,
+        enabled=False,
+        on_click=lambda: confirm_character_selection(char_selection_data),
+        text_size=1.5,
+        highlight_color=color.white66,
+        highlight_sound='button1.mp3'
+    )
+
+    # Кнопка закрытия (крестик)
+    close_button = Button(
+        parent=camera.ui,
+        text='X',
+        color=color.red,
+        scale=(0.05, 0.05),
+        position=(0.8, 0.45, 0),
+        z=-26,
+        on_click=lambda: [close_character_selection(char_selection_data),button_click_sound.play()],
+        highlight_sound='button1.mp3'
+    )
+
+    # СОХРАНЯЕМ ВСЕ ССЫЛКИ (ДОБАВЬ name_bg и name_text!)
+    char_selection_data['name_bg'] = name_bg
+    char_selection_data['name_text'] = name_text
+    char_selection_data['desc_bg'] = desc_bg
+    char_selection_data['description_text'] = description_text
+    char_selection_data['select_button'] = select_button
+    char_selection_data['close_button'] = close_button
+
+    # Сохраняем в глобальной переменной
+    global char_selection
+    char_selection = char_selection_data
+
+
+def select_character(char_data, char_selection_data):
+    """Обрабатывает выбор персонажа"""
+    print(f"🎯 Выбран персонаж: {char_data['name']}")
+
+    # Сбрасываем подсветку всех персонажей
+    for char_info in char_selection_data['characters']:
+        char_info['frame'].color = color.rgb(80, 80, 80)
+
+    # Обновляем выбранного персонажа
+    char_selection_data['selected_char'] = char_data
+
+    # ================= ПОКАЗЫВАЕМ ИМЯ ОТДЕЛЬНО =================
+    if char_selection_data['name_bg']:
+        char_selection_data['name_bg'].enabled = True
+
+    if char_selection_data['name_text']:
+        char_selection_data['name_text'].enabled = True
+        char_selection_data['name_text'].text = char_data['name']  # ТОЛЬКО ИМЯ
+
+    # ================= ПОКАЗЫВАЕМ ОПИСАНИЕ ОТДЕЛЬНО =================
+    if char_selection_data['desc_bg']:
+        char_selection_data['desc_bg'].enabled = True
+
+    if char_selection_data['description_text']:
+        char_selection_data['description_text'].enabled = True
+        char_selection_data['description_text'].text = char_data['description']  # ТОЛЬКО ОПИСАНИЕ (без имени)
+
+    # Показываем кнопку "Выбрать"
+    if char_selection_data['select_button']:
+        char_selection_data['select_button'].enabled = True
+
+    # Подсвечиваем только выбранную карточку
+    for char_info in char_selection_data['characters']:
+        if char_info['data']['name'] == char_data['name']:
+            char_info['frame'].color = color.gold
+            break
+
+def confirm_character_selection(char_selection_data):
+    """Подтверждает выбор персонажа и начинает игру"""
+    if not char_selection_data['selected_char']:
+        print("⚠️ Сначала выберите персонажа!")
+        return
+
+    selected_char = char_selection_data['selected_char']
+    print(f"🚀 Начинаем игру с персонажем: {selected_char['name']}")
+
+    # ЗАПОМНИТЕ ВЫБРАННОГО ПЕРСОНАЖА
+    global selected_character
+    selected_character = selected_char
+
+    # Закрываем меню выбора персонажа
+    close_character_selection(char_selection_data)
+
+    # Удаляем ВСЕ меню и начинаем игру
+    play_video()
+
+pygame.mixer.init()
+sound4 = pygame.mixer.Sound('delete3.mp3')
+def play_video():
+    sound3.stop()
+
+    """Воспроизводит видео и звук через pygame"""
+
+    # Инициализируем pygame для звука
+    try:
+        pygame.mixer.init()
+        print("✅ Pygame mixer инициализирован")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации pygame: {e}")
+        # Если pygame не работает, запускаем игру сразу
+        start_game_from_menu()
+        return
+
+    # Создаем черный фон
+    video_bg = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=color.black,
+        scale=(2, 2),
+        z=-30
+    )
+
+    # Загружаем и воспроизводим звук через pygame
+    sound = None
+    try:
+        sound = pygame.mixer.Sound('video1.mp3')
+        sound_length = sound.get_length()
+        print(f"🔊 Звук загружен, длина: {sound_length:.1f} сек")
+        sound.play()
+    except Exception as e:
+        print(f"❌ Ошибка загрузки звука: {e}")
+
+    # Пытаемся загрузить видео
+    video_entity = None
+    try:
+        video_entity = Entity(
+            parent=camera.ui,
+            model='quad',
+            texture='video1.mov',
+            scale=(1.8, 1),
+            z=-31
+        )
+        print("✅ Видео загружено")
+    except Exception as e:
+        print(f"❌ Не удалось загрузить видео: {e}")
+
+    # Определяем длительность (если звук загрузился, используем его длину)
+    video_duration = 11.0  # по умолчанию
+    if sound:
+        video_duration = sound_length
+
+    print(f"⏱️ Длительность видео: {video_duration:.1f} сек")
+
+    def cleanup_and_start_game():
+        """Очистка и запуск игры"""
+        # Останавливаем звук если он играет
+        if sound:
+            sound.stop()
+
+        # Удаляем видео элементы
+        if video_entity:
+            destroy(video_entity)
+        destroy(video_bg)
+
+
+        print("🎬 Видео завершено, начинаем игру...")
+        start_game_from_menu()
+        sound4.play(loops=-1)
+
+    # Ждем длительность видео + небольшую задержку
+    invoke(cleanup_and_start_game, delay=video_duration)
+
+def close_character_selection(char_selection_data):
+    """Закрывает меню выбора персонажа (возвращает в главное меню)"""
+    print("👤 Закрыт выбор персонажа")
+
+
+    # ВОССТАНАВЛИВАЕМ кнопки главного меню
+    for button in char_selection_data.get('blocked_main_buttons', []):
+        button.enabled = True
+
+    # Удаляем все элементы меню выбора персонажа
+    elements_to_destroy = []
+
+    # Все элементы которые нужно удалить (ДОБАВЛЕНО name_bg и name_text)
+    keys_to_destroy = ['background', 'window', 'title',
+                       'name_bg', 'name_text',  # ← ЭТИ ДВЕ СТРОЧКИ ДОБАВЬ
+                       'desc_bg', 'description_text', 'select_button', 'close_button']
+
+    for key in keys_to_destroy:
+        if char_selection_data.get(key):
+            elements_to_destroy.append(char_selection_data[key])
+
+    # Добавляем элементы персонажей
+    for char in char_selection_data['characters']:
+        elements_to_destroy.extend([char['frame'], char['image'], char['button']])
+
+    # Уничтожаем все
+    for entity in elements_to_destroy:
+        if entity:
+            destroy(entity)
+
+    # Очищаем глобальную переменную
+    global char_selection
+    char_selection = None
+
+
+# Обновляем функцию play_sound_and_start
 def play_sound_and_start():
-    """Простая функция для кнопки PLAY"""
+    """Показывает меню выбора персонажа при нажатии PLAY"""
     button_click_sound.play()
-    invoke(start_game_from_menu, delay=0.2)  # Ждем звук
+    invoke(show_character_selection, delay=0.2)
 
 
 
@@ -1967,7 +2607,8 @@ def show_weapon_info(weapon_name):
         color=color.red,
         scale=(0.08, 0.08),
         position=(0.45, 0.35, -0.5),
-        on_click=lambda: close_weapon_info()
+        on_click=lambda: [close_weapon_info(),button_click_sound.play()],
+        highlight_sound='button1.mp3'
     )
     close_button.text_entity.font = 'custom2.ttf'
 
@@ -1982,7 +2623,8 @@ def show_weapon_info(weapon_name):
             color=color.rgba(0.2, 0.6, 0.2, 1),
             scale=(0.4, 0.12),
             position=(0, button_y, -0.1),
-            on_click=lambda: select_weapon(weapon_name),
+            on_click=lambda: [select_weapon(weapon_name),button_click_sound.play()],
+            highlight_sound='button1.mp3',
             font='custom2.ttf'
         )
         select_button.text_entity.font = 'custom2.ttf'
@@ -2025,6 +2667,8 @@ def show_weapon_info(weapon_name):
             scale=(0.5, 0.12),
             position=(0, button_y, -0.1),
             font='custom2.ttf',
+            highlight_sound='button1.mp3',
+            pressed_sound='sound3.mp3'
         )
         locked_button.text_entity.font = 'custom2.ttf'
 
@@ -2168,6 +2812,7 @@ def select_weapon(weapon_name):
 
     # Начинаем игру через небольшой промежуток
     print("🎮 Начинаем игру с пистолетом...")
+
     invoke(start_game_from_weapon, delay=0.7)
 
 
@@ -2280,9 +2925,11 @@ def start_game_from_weapon():
 
     # Ждем завершения анимации
     invoke(finish_game_start, delay=0.7)
-
+pygame.mixer.init()
+sound2 = pygame.mixer.Sound('delete1.mp3')
 
 def finish_game_start():
+    global sound4
     """Завершает начало игры после анимации - ТЕПЕРЬ С ПОЛНОЙ ОЧИСТКОЙ"""
     global game_started, pickup_text, current_stage, enemies_spawned_for_current_stage
     global weapon_hud, ammo_text, weapon_icons  # Добавляем глобальные переменные HUD
@@ -2292,13 +2939,16 @@ def finish_game_start():
     # =========== ПОЛНАЯ ОЧИСТКА ЛОББИ ===========
     cleanup_lobby_entirely()
 
+
     game_started = True
     camera_mode = "player"
+
 
     # Включаем управление игроком
     player.enabled = True
     mouse.locked = True
-    player.position = Vec3(50, 10, -31)
+    player.position = Vec3(-8, 10, -308)
+    create_wall((-16,0,-309),(-4,0,-309),height=40,thickness=0.1)
     camera.position = (0, 0, 0)
     camera.rotation = (0, 0, 0)
     location.enabled=False
@@ -2335,6 +2985,10 @@ def finish_game_start():
     # Инициализируем оптимизированные системы
     if not optimized_systems_initialized:
         init_optimized_systems()
+    sound4.stop()
+
+
+    sound2.play(loops=-1)
 
     # Запускаем первую стадию (через небольшую задержку)
     current_stage = 1
@@ -2568,7 +3222,7 @@ def show_coordinates_console():
         coordinates_debug_timer = 0.0
 
 
-window.fullscreen = False
+window.fullscreen = True
 
 human = Entity(
     parent=scene, position=(-5, 0, 5))
@@ -5327,6 +5981,33 @@ def update_health_hud():
             health_text.color = color.white
             heart_icon.scale = (0.05, 0.05)  # Возвращаем нормальный размер
 
+    # ПРОВЕРКА СМЕРТИ, ВИДЕО И АУДИО
+    if player_health <= 0 and not hasattr(update_health_hud, 'death_triggered'):
+        update_health_hud.death_triggered = True
+        sound3.stop()
+        sound4.stop()
+        sound2.stop()
+
+        # Видео поверх всего
+        video = Entity(
+            model='quad',
+            texture='death_video.mp4',  # или 'death_animation.mp4'
+            scale=(2, 1.125),
+            position=(0, 0, -10),
+            parent=camera.ui
+        )
+        video.texture.play()
+
+        # Аудио смерти через pygame
+        try:
+            death_sound = pygame.mixer.Sound('death_audio.mp3')
+            death_sound.play()
+        except:
+            print("⚠️ Не удалось воспроизвести death_audio.mp3")
+
+        # Выход после видео (3 секунды)
+        invoke(application.quit, delay=12.0)
+
 
 # ФУНКЦИЯ НАНЕСЕНИЯ УРОНА
 def take_damage(amount):
@@ -6422,7 +7103,10 @@ def protect_critical_objects():
 
 def update_shader_intensity():
     """Обновляет интенсивность шейдера в зависимости от текущего уровня"""
-    global shader_intensity, current_stage, shader_enabled
+    global shader_intensity, current_stage, shader_enabled,shader_permanent_disable
+
+    if not shader_permanent_disable:
+        return
 
     # Сохраняем предыдущую интенсивность для проверки включения
     previous_intensity = shader_intensity
@@ -6689,7 +7373,7 @@ def show_congratulation():
 
     # Плавное затемнение (3 секунды)
     trigger_fade_overlay.color = color.rgba(0, 0, 0, 0)
-    trigger_fade_overlay.animate_color(color.rgba(0, 0, 0, 1), duration=3.0)
+    trigger_fade_overlay.animate_color(color.rgba(0, 0, 0, 1), duration=1.0)
 
     # 2. Текст "Congratulation" по центру
     trigger_congratulation_text = Text(
@@ -6736,7 +7420,7 @@ def show_congratulation():
     print("🎉 ПОЗДРАВЛЯЕМ! Вы достигли 25+ волны!")
 
     # 4. Выход через 7 секунд
-    invoke(quit_game, delay=7.0)
+    invoke(quit_game, delay=3.0)
 
 
 def quit_game():
@@ -6759,6 +7443,17 @@ def update():
     global target_weapon_rotation, current_weapon_rotation, target_weapon_position, current_weapon_position, mouse_movement
     global stun_effect_time, is_stunned, shoot_strength, reload_strength, walk_strength, shader_enabled, grenade_effect
     global lvl, shader_intensity
+    global shader_test_window
+    # ЕСЛИ АКТИВНО ТЕСТИРОВАНИЕ ШЕЙДЕРА
+    if shader_test_window and shader_test_window.get('is_active', True):
+        # Обновляем только тестовое окно
+        if 'menu_background' in shader_test_window:
+            menu_bg = shader_test_window['menu_background']
+            if menu_bg and menu_bg.enabled:
+                # Обновляем время
+                menu_bg.set_shader_input("time", time.time())
+
+        return
     if menu_active:
         camera.set_shader_input("time", time.time())
         camera.set_shader_input("base_intensity", 0.0)
@@ -6771,6 +7466,8 @@ def update():
         check_trigger()
     if random.random() < 0.5:  # 50% шанс обновления каждый кадр
         update_blood_effects_optimized()
+        # Если открыто окно тестирования шейдеров
+
 
     if not hasattr(update, 'last_blood_cleanup'):
         update.last_blood_cleanup = time.time()
